@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.idea/
+.vscode/
+
+# Docker
+postgres_data/
+postgres_data_prod/
+redis_data/
+caddy_data/
+caddy_config/
+
+# OS
+.DS_Store
+Thumbs.db

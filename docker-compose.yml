@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: dailysql-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dailysql
+    ports:
+      - "5432:5432"
+    volumes:
+      - dailysql_pgdata:/var/lib/postgresql/data
+
+  api:
+    build: ./backend
+    container_name: dailysql-api
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/dailysql
+      REDIS_URL: redis://redis:6379
+      SUPABASE_JWT_SECRET: "your_supabase_jwt_secret"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+    depends_on:
+      - postgres
+      - redis
+
+  redis:
+    image: redis:7
+    container_name: dailysql-redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  dailysql_pgdata:

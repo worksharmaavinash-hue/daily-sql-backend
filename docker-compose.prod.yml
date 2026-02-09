@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  # Backend API
+  dailysql-api:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dailysql_api_prod
+    restart: always
+    env_file: .env.production
+    depends_on:
+      - dailysql-postgres
+      - dailysql-redis
+    networks:
+      - dailysql-network
+
+  # Database
+  dailysql-postgres:
+    image: postgres:15-alpine
+    container_name: dailysql_postgres_prod
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    networks:
+      - dailysql-network
+
+  # Redis Cache
+  dailysql-redis:
+    image: redis:7-alpine
+    container_name: dailysql_redis_prod
+    restart: always
+    networks:
+      - dailysql-network
+
+  # Caddy Reverse Proxy & HTTPS
+  caddy:
+    image: caddy:2-alpine
+    container_name: dailysql_caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - dailysql-api
+    networks:
+      - dailysql-network
+
+volumes:
+  postgres_data_prod:
+  caddy_data:
+  caddy_config:
+
+networks:
+  dailysql-network:
+    driver: bridge

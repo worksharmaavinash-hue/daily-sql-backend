@@ -1,0 +1,4 @@
+# Replace 'api.dailysql.com' with your actual API subdomain (e.g. api.yourwebsite.com)
+api.dailysql.com {
+    reverse_proxy dailysql-api:8000
+}
