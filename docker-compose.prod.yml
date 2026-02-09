@@ -3,12 +3,12 @@ version: '3.8'
 services:
   # Backend API
   dailysql-api:
-    build: 
+    build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: dailysql_api_prod
     restart: always
-    env_file: .env.production
+    env_file: .env
     depends_on:
       - dailysql-postgres
       - dailysql-redis
@@ -58,6 +58,7 @@ volumes:
   postgres_data_prod:
   caddy_data:
   caddy_config:
+
 
 networks:
   dailysql-network:
