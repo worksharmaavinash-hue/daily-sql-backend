@@ -1,4 +1,5 @@
-# Replace 'api.dailysql.com' with your actual API subdomain (e.g. api.yourwebsite.com)
-api.dailysql.com {
+# Option 1: Accept traffic from ANY hostname on port 80 (works with VPS IP directly)
+# When DNS is configured, change :80 back to api.dailysql.com for automatic HTTPS
+:80 {
     reverse_proxy dailysql-api:8000
 }

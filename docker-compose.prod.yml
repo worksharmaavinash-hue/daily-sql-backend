@@ -9,6 +9,8 @@ services:
     container_name: dailysql_api_prod
     restart: always
     env_file: .env
+    ports:
+      - "8000:8000"
     depends_on:
       - dailysql-postgres
       - dailysql-redis
