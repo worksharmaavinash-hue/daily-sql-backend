@@ -1,5 +1,4 @@
-# Option 1: Accept traffic from ANY hostname on port 80 (works with VPS IP directly)
-# When DNS is configured, change :80 back to api.dailysql.com for automatic HTTPS
-:80 {
+# Option 2: Use nip.io for automatic HTTPS (Great for Vercel/Frontend integration)
+147.93.97.128.nip.io {
     reverse_proxy dailysql-api:8000
 }
