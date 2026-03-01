@@ -10,12 +10,13 @@ app = FastAPI()
 origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "https://daily-sql.com", # Placeholder for prod
+    "https://www.dailysql.in",
+    "https://dailysql.in",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # For dev simplicity, strict in prod
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
