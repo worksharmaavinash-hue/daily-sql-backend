@@ -1,9 +1,9 @@
-from fastapi import APIRouter, HTTPException
-from datetime import date
+import json
+from fastapi import APIRouter, HTTPException, Depends
 from datetime import date
 from app.db import get_pool
 from app.auth.jwt import verify_jwt
-from fastapi import Depends
+
 
 router = APIRouter(prefix="", tags=["user"])
 
@@ -63,6 +63,20 @@ async def get_problem(problem_id: str):
 
     return dict(problem)
 
+@router.get("/problems")
+async def list_problems():
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, title, difficulty, description, estimated_time_minutes
+            FROM core.problems
+            WHERE is_active = true
+            ORDER BY created_at DESC
+            """
+        )
+    return [dict(r) for r in rows]
+
 @router.get("/problems/{problem_id}/datasets")
 async def get_problem_datasets(problem_id: str):
     pool = await get_pool()
@@ -84,7 +98,7 @@ async def get_problem_datasets(problem_id: str):
         {
             "table_name": r["table_name"],
             "schema_sql": r["schema_sql"],
-            "sample_rows": r["sample_rows"],
+            "sample_rows": json.loads(r["sample_rows"]) if isinstance(r["sample_rows"], str) else r["sample_rows"],
         }
         for r in rows
     ]

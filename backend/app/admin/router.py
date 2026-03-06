@@ -127,7 +127,33 @@ async def list_schedule():
     ]
 
 
-# ============ POST ENDPOINTS (Create/Update) ============
+# ============ POST ENDPOINTS (Create/Update/Delete) ============
+
+@router.delete("/problems/{problem_id}")
+async def delete_problem(problem_id: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # The schema doesn't have ON DELETE CASCADE, so we manually clean up references
+            await conn.execute("DELETE FROM core.problem_datasets WHERE problem_id = $1", problem_id)
+            await conn.execute("DELETE FROM core.problem_solutions WHERE problem_id = $1", problem_id)
+            await conn.execute("DELETE FROM core.attempts WHERE problem_id = $1", problem_id)
+            
+            # Remove it from any daily practices
+            await conn.execute("UPDATE core.daily_practice SET easy_problem_id = NULL WHERE easy_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET medium_problem_id = NULL WHERE medium_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET advanced_problem_id = NULL WHERE advanced_problem_id = $1", problem_id)
+            
+            # Finally, delete the problem
+            result = await conn.execute(
+                "DELETE FROM core.problems WHERE id = $1",
+                problem_id
+            )
+            
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Problem not found")
+    return {"message": "Problem deleted"}
+
 
 @router.post("/problems")
 async def create_problem(payload: ProblemCreate):
@@ -167,7 +193,8 @@ async def add_dataset(problem_id: str, payload: DatasetCreate):
             payload.table_name,
             payload.schema_sql,
             payload.seed_sql,
-            json.dumps(payload.sample_rows),
+            json.dumps(payload.sample_rows),  # asyncpg accepts JSON string for jsonb columns
+
         )
 
     return {"dataset_id": str(dataset_id)}
