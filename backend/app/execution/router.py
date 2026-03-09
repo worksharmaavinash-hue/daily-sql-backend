@@ -45,6 +45,24 @@ async def execute_query(
             # 1️⃣ Validate problem
             await ensure_problem_exists(conn, payload.problem_id)
 
+            # 1.5 Check User Profile (Onboarding)
+            if user:
+                profile_exists = await conn.fetchval(
+                    "SELECT onboarding_completed FROM core.users WHERE user_id = $1", 
+                    user["user_id"]
+                )
+                if not profile_exists:
+                    # Fallback check for waitlist if needed during transition
+                    in_waitlist = await conn.fetchval("SELECT 1 FROM waitlist WHERE user_id = $1", user["user_id"])
+                    if not in_waitlist:
+                        return {
+                            "status": "error",
+                            "user": None,
+                            "expected": None,
+                            "error": "PROFILE_REQUIRED",
+                            "diff_reason": "Please complete your profile details to start practicing."
+                        }
+
             # 2️⃣ Setup isolated schema & data
             schema_name = await setup_execution_schema(conn, payload.problem_id)
 
@@ -96,6 +114,23 @@ async def execute_query(
                         user_id=user_id,
                         was_correct=is_correct
                     )
+
+                    # NEW: Save successful query for future review
+                    if is_correct:
+                        await conn.execute(
+                            """
+                            INSERT INTO core.user_solutions (user_id, problem_id, submitted_query, execution_time_ms)
+                            VALUES ($1, $2, $3, $4)
+                            ON CONFLICT (user_id, problem_id) DO UPDATE SET
+                                submitted_query = EXCLUDED.submitted_query,
+                                execution_time_ms = EXCLUDED.execution_time_ms,
+                                created_at = NOW()
+                            """,
+                            user_id,
+                            payload.problem_id,
+                            payload.query,
+                            user_result["execution_time_ms"]
+                        )
                 except Exception as e:
                     print(f"Stats recording error: {e}")
 

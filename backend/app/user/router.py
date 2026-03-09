@@ -4,6 +4,8 @@ from datetime import date
 from app.db import get_pool
 from app.auth.jwt import verify_jwt
 from fastapi import Depends
+from pydantic import BaseModel
+from typing import Optional, List
 
 router = APIRouter(prefix="", tags=["user"])
 
@@ -137,3 +139,92 @@ async def get_today_attempts(user=Depends(verify_jwt)):
         }
         for r in rows
     ]
+
+class ProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    occupation: Optional[str] = None
+    job_role: Optional[str] = None
+    experience_years: Optional[int] = None
+
+@router.get("/me/profile")
+async def get_my_profile(user=Depends(verify_jwt)):
+    pool = await get_pool()
+    user_id = user["user_id"]
+
+    async with pool.acquire() as conn:
+        profile = await conn.fetchrow(
+            """
+            SELECT user_id, email, full_name, occupation, job_role, experience_years, onboarding_completed, created_at
+            FROM core.users
+            WHERE user_id = $1
+            """,
+            user_id
+        )
+
+        if not profile:
+            # Fallback check if they are in the legacy waitlist
+            waitlist = await conn.fetchrow(
+                "SELECT * FROM waitlist WHERE user_id = $1", user_id
+            )
+            if waitlist:
+                # Auto-migrate on the fly if needed? 
+                # For now just return a skeleton stating they need to onboard
+                return {
+                    "exists": False,
+                    "in_waitlist": True,
+                    "email": user.get("email")
+                }
+            return {"exists": False, "in_waitlist": False, "email": user.get("email")}
+
+    return {
+        "exists": True,
+        **dict(profile)
+    }
+
+@router.post("/me/profile")
+async def update_my_profile(data: ProfileUpdate, user=Depends(verify_jwt)):
+    pool = await get_pool()
+    user_id = user["user_id"]
+    email = user.get("email")
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Email required from token")
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO core.users (user_id, email, full_name, occupation, job_role, experience_years, onboarding_completed)
+            VALUES ($1, $2, $3, $4, $5, $6, true)
+            ON CONFLICT (user_id) DO UPDATE SET
+                full_name = COALESCE(EXCLUDED.full_name, core.users.full_name),
+                occupation = COALESCE(EXCLUDED.occupation, core.users.occupation),
+                job_role = COALESCE(EXCLUDED.job_role, core.users.job_role),
+                experience_years = COALESCE(EXCLUDED.experience_years, core.users.experience_years),
+                onboarding_completed = true
+            """,
+            user_id,
+            email,
+            data.full_name,
+            data.occupation,
+            data.job_role,
+            data.experience_years
+        )
+
+    return {"status": "success"}
+
+@router.get("/me/solutions/{problem_id}")
+async def get_my_solution(problem_id: str, user=Depends(verify_jwt)):
+    pool = await get_pool()
+    user_id = user["user_id"]
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT submitted_query FROM core.user_solutions WHERE user_id = $1 AND problem_id = $2",
+            user_id,
+            problem_id
+        )
+
+    if not row:
+        return {"submitted_query": None}
+
+    return {"submitted_query": row["submitted_query"]}

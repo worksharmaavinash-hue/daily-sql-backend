@@ -50,3 +50,25 @@ CREATE TABLE IF NOT EXISTS core.streaks (
     current_streak INT NOT NULL DEFAULT 0,
     last_active_date DATE
 );
+
+-- NEW: Main User Profile Table
+CREATE TABLE IF NOT EXISTS core.users (
+    user_id UUID PRIMARY KEY, -- References Supabase Auth UID
+    email TEXT UNIQUE NOT NULL,
+    full_name TEXT,
+    occupation TEXT,
+    job_role TEXT,
+    experience_years INTEGER,
+    onboarding_completed BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- NEW: Table for saving the user's best/latest successful solution
+CREATE TABLE IF NOT EXISTS core.user_solutions (
+    user_id UUID NOT NULL,
+    problem_id UUID NOT NULL,
+    submitted_query TEXT NOT NULL,
+    execution_time_ms INT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (user_id, problem_id)
+);
