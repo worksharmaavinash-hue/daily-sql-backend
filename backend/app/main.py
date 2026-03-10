@@ -3,24 +3,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.execution.router import router as execution_router 
 from app.admin.router import router as admin_router
 from app.user.router import router as user_router
+import os
 
 
 import os
 
 app = FastAPI()
 
-# Load CORS origins from environment variable
-cors_origins_env = os.getenv("ALLOWED_CORS_ORIGINS", "")
-if cors_origins_env:
-    origins = [origin.strip() for origin in cors_origins_env.split(",")]
-else:
-    # Fallback to defaults if not set
-    origins = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://www.dailysql.in",
-        "https://dailysql.in",
-    ]
+# CORS origins: configurable via CORS_ORIGINS env var (comma-separated)
+# Defaults to localhost + production domains
+_default_origins = "http://localhost:3000,http://127.0.0.1:3000,https://www.dailysql.in,https://dailysql.in"
+origins = [
+    o.strip()
+    for o in os.getenv("CORS_ORIGINS", _default_origins).split(",")
+    if o.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,

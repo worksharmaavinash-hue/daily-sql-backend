@@ -1,4 +1,5 @@
 api.dailysql.in {
+
     # Allow CORS
     header {
         Access-Control-Allow-Origin "https://www.dailysql.in"
