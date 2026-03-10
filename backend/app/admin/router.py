@@ -8,8 +8,23 @@ from app.admin.schemas import (
     SolutionCreate,
     DailyPracticeCreate
 )
+from app.execution.schema_manager import generate_schema_name, teardown_execution_schema
 import json
 import os
+from datetime import date, datetime
+from decimal import Decimal
+from uuid import UUID as PyUUID
+
+
+def json_serial(obj):
+    """Custom JSON serializer for types not serializable by default json."""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, PyUUID):
+        return str(obj)
+    raise TypeError(f"Type {type(obj)} not serializable")
 
 API_KEY_NAME = "X-Admin-Secret"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
@@ -64,7 +79,7 @@ async def get_problem_details(problem_id: str):
             raise HTTPException(status_code=404, detail="Problem not found")
         
         datasets = await conn.fetch(
-            "SELECT id, table_name, schema_sql, seed_sql, sample_rows FROM core.problem_datasets WHERE problem_id = $1",
+            "SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types FROM core.problem_datasets WHERE problem_id = $1",
             problem_id
         )
         solution = await conn.fetchrow(
@@ -84,7 +99,8 @@ async def get_problem_details(problem_id: str):
                 "table_name": d["table_name"],
                 "schema_sql": d["schema_sql"],
                 "seed_sql": d["seed_sql"],
-                "sample_rows": d["sample_rows"]
+                "sample_rows": d["sample_rows"],
+                "column_types": d["column_types"]
             }
             for d in datasets
         ],
@@ -182,19 +198,36 @@ async def add_dataset(problem_id: str, payload: DatasetCreate):
     dataset_id = uuid4()
 
     async with pool.acquire() as conn:
+        schema_name = generate_schema_name()
+        
+        try:
+            await conn.execute(f'CREATE SCHEMA "{schema_name}"')
+            await conn.execute(f'SET search_path TO "{schema_name}"')
+            
+            # Execute schemas and seed
+            await conn.execute(payload.schema_sql)
+            await conn.execute(payload.seed_sql)
+            
+            # Fetch sample rows
+            records = await conn.fetch(f"SELECT * FROM {payload.table_name} LIMIT 10")
+            sample_rows = [dict(record) for record in records]
+        finally:
+            await teardown_execution_schema(conn, schema_name)
+            await conn.execute('SET search_path TO public')
+
         await conn.execute(
             """
             INSERT INTO core.problem_datasets
-            (id, problem_id, table_name, schema_sql, seed_sql, sample_rows)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            (id, problem_id, table_name, schema_sql, seed_sql, sample_rows, column_types)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             """,
             dataset_id,
             problem_id,
             payload.table_name,
             payload.schema_sql,
             payload.seed_sql,
-            json.dumps(payload.sample_rows),  # asyncpg accepts JSON string for jsonb columns
-
+            json.dumps(sample_rows, default=json_serial),
+            json.dumps(payload.column_types),
         )
 
     return {"dataset_id": str(dataset_id)}

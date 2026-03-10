@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS core.problem_datasets (
     table_name TEXT NOT NULL,
     schema_sql TEXT NOT NULL,
     seed_sql TEXT NOT NULL,
-    sample_rows JSONB NOT NULL
+    sample_rows JSONB NOT NULL,
+    column_types JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE TABLE IF NOT EXISTS core.problem_solutions (
