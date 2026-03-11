@@ -13,7 +13,7 @@ class DatasetCreate(BaseModel):
     table_name: str
     schema_sql: str
     seed_sql: str
-    sample_rows: List[Dict]
+    column_types: Dict[str, str] = {}
 
 class SolutionCreate(BaseModel):
     reference_query: str
