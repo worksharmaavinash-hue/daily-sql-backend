@@ -276,3 +276,97 @@ async def get_my_solution(problem_id: str, user=Depends(verify_jwt)):
         return {"submitted_query": None}
 
     return {"submitted_query": row["submitted_query"]}
+
+@router.get("/me/stats")
+async def get_my_stats(user=Depends(verify_jwt)):
+    pool = await get_pool()
+    user_id = user["user_id"]
+
+    async with pool.acquire() as conn:
+        # Get count of distinct problems solved by difficulty
+        rows = await conn.fetch(
+            """
+            SELECT p.difficulty, COUNT(DISTINCT us.problem_id) as solved
+            FROM core.user_solutions us
+            JOIN core.problems p ON us.problem_id = p.id
+            WHERE us.user_id = $1
+            GROUP BY p.difficulty
+            """,
+            user_id
+        )
+        
+        # Get total problem counts by difficulty
+        totals = await conn.fetch(
+            """
+            SELECT difficulty, COUNT(*) as total
+            FROM core.problems
+            WHERE is_active = true
+            GROUP BY difficulty
+            """
+        )
+
+    stats = {
+        "easy": {"solved": 0, "total": 0},
+        "medium": {"solved": 0, "total": 0},
+        "advanced": {"solved": 0, "total": 0}
+    }
+
+    for r in totals:
+        diff = r["difficulty"].lower()
+        if diff in stats:
+            stats[diff]["total"] = r["total"]
+            
+    for r in rows:
+        diff = r["difficulty"].lower()
+        if diff in stats:
+            stats[diff]["solved"] = r["solved"]
+
+    return stats
+
+@router.get("/me/submissions")
+async def get_recent_submissions(user=Depends(verify_jwt)):
+    pool = await get_pool()
+    user_id = user["user_id"]
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT us.problem_id, p.title, p.difficulty, us.created_at
+            FROM core.user_solutions us
+            JOIN core.problems p ON us.problem_id = p.id
+            WHERE us.user_id = $1
+            ORDER BY us.created_at DESC
+            LIMIT 10
+            """,
+            user_id
+        )
+
+    return [
+        {
+            "id": r["problem_id"],
+            "title": r["title"],
+            "difficulty": r["difficulty"].lower(),
+            "created_at": r["created_at"]
+        }
+        for r in rows
+    ]
+
+@router.get("/me/heatmap")
+async def get_practice_heatmap(user=Depends(verify_jwt)):
+    pool = await get_pool()
+    user_id = user["user_id"]
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT attempt_date, COUNT(*) as count
+            FROM core.attempts
+            WHERE user_id = $1 AND status = 'correct'
+            GROUP BY attempt_date
+            ORDER BY attempt_date DESC
+            LIMIT 365
+            """,
+            user_id
+        )
+
+    return {str(r["attempt_date"]): r["count"] for r in rows}
