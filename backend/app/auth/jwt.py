@@ -18,8 +18,13 @@ def get_verification_key():
     if JWT_SECRET_RAW.strip().startswith('{'):
         try:
             jwk_data = json.loads(JWT_SECRET_RAW)
-            from jwt.algorithms import ECAlgorithm
-            return ECAlgorithm.from_jwk(jwk_data)
+            from jwt.algorithms import get_default_algorithms
+            algo = get_default_algorithms().get('ES256')
+            if not algo:
+                # If cryptography is missing, this might return None or a dummy
+                print("ES256 algorithm not registered. Ensure 'cryptography' is installed.")
+                return JWT_SECRET_RAW
+            return algo.from_jwk(jwk_data)
         except Exception as e:
             print(f"Failed to parse JWK JSON: {e}")
             return JWT_SECRET_RAW

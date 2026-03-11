@@ -3,4 +3,5 @@ uvicorn
 asyncpg
 redis
 pyjwt
+cryptography
 requests
