@@ -14,16 +14,19 @@ def verify_jwt(
     token = credentials.credentials
     
     try:
+        # Supabase newer projects use ES256 (ECC), older ones use HS256. 
+        # We allow both but HS256 is the usual default for "Secrets".
         payload = jwt.decode(
             token,
             JWT_SECRET,
-            algorithms=["HS256"],
+            algorithms=["HS256", "ES256"],
             audience="authenticated"
         )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except jwt.InvalidTokenError as e:
+        print(f"JWT Verification Failed: {str(e)}")
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
     return {
         "user_id": payload["sub"],
@@ -47,13 +50,15 @@ def verify_jwt_optional(
         payload = jwt.decode(
             token,
             JWT_SECRET,
-            algorithms=["HS256"],
+            algorithms=["HS256", "ES256"],
             audience="authenticated"
         )
         return {
             "user_id": payload["sub"],
             "email": payload.get("email")
         }
-    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError) as e:
         # Token is invalid or expired - treat as guest
+        if token:
+            print(f"Optional JWT Verification Failed: {str(e)}")
         return None
