@@ -1,12 +1,32 @@
 import jwt
 import os
+import json
 from fastapi import HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from typing import Optional
 
 security = HTTPBearer()
 security_optional = HTTPBearer(auto_error=False)
-JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+JWT_SECRET_RAW = os.getenv("SUPABASE_JWT_SECRET")
+
+def get_verification_key():
+    """Smart key loader: handles HS256 secrets, PEM strings, or JWK JSON."""
+    if not JWT_SECRET_RAW:
+        return None
+    
+    # Check if it's a JWK JSON
+    if JWT_SECRET_RAW.strip().startswith('{'):
+        try:
+            jwk_data = json.loads(JWT_SECRET_RAW)
+            from jwt.algorithms import ECAlgorithm
+            return ECAlgorithm.from_jwk(jwk_data)
+        except Exception as e:
+            print(f"Failed to parse JWK JSON: {e}")
+            return JWT_SECRET_RAW
+            
+    return JWT_SECRET_RAW
+
+JWT_KEY = get_verification_key()
 
 def verify_jwt(
     credentials: HTTPAuthorizationCredentials = Security(security)
@@ -18,7 +38,7 @@ def verify_jwt(
         # We allow both but HS256 is the usual default for "Secrets".
         payload = jwt.decode(
             token,
-            JWT_SECRET,
+            JWT_KEY,
             algorithms=["HS256", "ES256"],
             audience="authenticated"
         )
@@ -49,7 +69,7 @@ def verify_jwt_optional(
     try:
         payload = jwt.decode(
             token,
-            JWT_SECRET,
+            JWT_KEY,
             algorithms=["HS256", "ES256"],
             audience="authenticated"
         )
