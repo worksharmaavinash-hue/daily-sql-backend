@@ -207,21 +207,6 @@ async def get_my_profile(user=Depends(verify_jwt)):
         )
 
         if not profile:
-            # Fallback check if they are in the legacy waitlist
-            try:
-                waitlist = await conn.fetchrow(
-                    "SELECT * FROM waitlist WHERE user_id = $1", user_id
-                )
-                if waitlist:
-                    return {
-                        "exists": False,
-                        "in_waitlist": True,
-                        "email": user.get("email")
-                    }
-            except Exception:
-                # Table doesn't exist or other query error - ignore legacy check
-                pass
-                
             return {"exists": False, "in_waitlist": False, "email": user.get("email")}
 
     return {
