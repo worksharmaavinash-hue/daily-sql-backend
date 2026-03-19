@@ -16,10 +16,11 @@ services:
   api:
     build: ./backend
     container_name: dailysql-api
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/dailysql
       REDIS_URL: redis://redis:6379
-      SUPABASE_JWT_SECRET: "your_supabase_jwt_secret"
     ports:
       - "8000:8000"
     volumes:

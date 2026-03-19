@@ -52,10 +52,13 @@ CREATE TABLE IF NOT EXISTS core.streaks (
     last_active_date DATE
 );
 
--- NEW: Main User Profile Table
+-- Main User Profile Table
 CREATE TABLE IF NOT EXISTS core.users (
-    user_id UUID PRIMARY KEY, -- References Supabase Auth UID
+    user_id UUID PRIMARY KEY,
     email TEXT UNIQUE NOT NULL,
+    hashed_password TEXT,                              -- NULL for OAuth-only users
+    auth_provider TEXT NOT NULL DEFAULT 'email',       -- 'email' | 'google'
+    provider_id TEXT,                                  -- Google's `sub` claim for OAuth users
     full_name TEXT,
     occupation TEXT,
     job_role TEXT,

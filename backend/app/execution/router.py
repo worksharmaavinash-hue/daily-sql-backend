@@ -52,16 +52,13 @@ async def execute_query(
                     user["user_id"]
                 )
                 if not profile_exists:
-                    # Fallback check for waitlist if needed during transition
-                    in_waitlist = await conn.fetchval("SELECT 1 FROM waitlist WHERE user_id = $1", user["user_id"])
-                    if not in_waitlist:
-                        return {
-                            "status": "error",
-                            "user": None,
-                            "expected": None,
-                            "error": "PROFILE_REQUIRED",
-                            "diff_reason": "Please complete your profile details to start practicing."
-                        }
+                    return {
+                        "status": "error",
+                        "user": None,
+                        "expected": None,
+                        "error": "PROFILE_REQUIRED",
+                        "diff_reason": "Please complete your profile details to start practicing."
+                    }
 
             # 2️⃣ Setup isolated schema & data
             schema_name = await setup_execution_schema(conn, payload.problem_id)

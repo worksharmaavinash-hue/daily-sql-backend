@@ -2,6 +2,11 @@ fastapi
 uvicorn
 asyncpg
 redis
-pyjwt
-cryptography
+python-jose[cryptography]
+passlib[bcrypt]
+authlib
+httpx
+itsdangerous
+python-multipart
 requests
+pydantic[email]

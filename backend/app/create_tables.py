@@ -16,6 +16,17 @@ async def init_db():
         print("Creating schema...")
         await conn.execute(schema_sql)
         print("Schema created successfully.")
+
+        print("Applying dynamic schema migrations...")
+        try:
+            await conn.execute("""
+                ALTER TABLE core.users ADD COLUMN IF NOT EXISTS hashed_password TEXT;
+                ALTER TABLE core.users ADD COLUMN IF NOT EXISTS auth_provider TEXT DEFAULT 'email';
+                ALTER TABLE core.users ADD COLUMN IF NOT EXISTS provider_id TEXT;
+            """)
+            print("Migrations applied successfully.")
+        except Exception as e:
+            print(f"Warning: Migrations skipped or failed: {e}")
         
         await conn.close()
     except Exception as e:
