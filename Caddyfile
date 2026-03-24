@@ -1,24 +1,3 @@
 api.dailysql.in {
-    reverse_proxy dailysql-api:8000 {
-        # Strip the upstream CORS headers so Caddy doesn't stack a duplicate on top
-        header_down -Access-Control-Allow-Origin
-        header_down -Access-Control-Allow-Methods
-        header_down -Access-Control-Allow-Headers
-        header_down -Access-Control-Allow-Credentials
-        header_down -Access-Control-Max-Age
-    }
-
-    # Caddy re-adds them once, correctly reflecting the request Origin
-    @cors_request header Origin *
-    header @cors_request Access-Control-Allow-Origin {http.request.header.Origin}
-    header @cors_request Access-Control-Allow-Credentials "true"
-    header @cors_request Access-Control-Allow-Methods "*"
-    header @cors_request Access-Control-Allow-Headers "*"
-
-    # Handle preflight OPTIONS requests directly in Caddy
-    @preflight {
-        method OPTIONS
-        header Origin *
-    }
-    respond @preflight 204
+    reverse_proxy dailysql-api:8000
 }
