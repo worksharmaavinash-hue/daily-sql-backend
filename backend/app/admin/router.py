@@ -274,3 +274,207 @@ async def schedule_daily_practice(payload: DailyPracticeCreate):
         )
 
     return {"status": "scheduled"}
+
+
+# ============ PATCH / EDIT ENDPOINTS ============
+
+@router.patch("/problems/{problem_id}")
+async def edit_problem(problem_id: str, payload: dict):
+    """Edit an existing problem's metadata."""
+    allowed = {"title", "difficulty", "description", "estimated_time_minutes"}
+    updates = {k: v for k, v in payload.items() if k in allowed}
+    if not updates:
+        return {"status": "no_changes"}
+
+    pool = await get_pool()
+    set_clauses = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(updates))
+    values = list(updates.values())
+
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            f"UPDATE core.problems SET {set_clauses} WHERE id = $1",
+            problem_id, *values
+        )
+    if result == "UPDATE 0":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Problem not found")
+    return {"status": "updated"}
+
+
+@router.patch("/problems/{problem_id}/datasets/{dataset_id}")
+async def edit_dataset(problem_id: str, dataset_id: str, payload: dict):
+    """Edit an existing dataset's schema, seed SQL, or column types."""
+    allowed = {"table_name", "schema_sql", "seed_sql", "column_types"}
+    updates = {k: v for k, v in payload.items() if k in allowed}
+    if not updates:
+        return {"status": "no_changes"}
+
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        # Re-run seed to regenerate sample_rows if schema/seed changed
+        if "schema_sql" in updates or "seed_sql" in updates:
+            from app.execution.schema_manager import generate_schema_name, teardown_execution_schema
+            schema_sql = updates.get("schema_sql") or (await conn.fetchval(
+                "SELECT schema_sql FROM core.problem_datasets WHERE id = $1", dataset_id))
+            seed_sql = updates.get("seed_sql") or (await conn.fetchval(
+                "SELECT seed_sql FROM core.problem_datasets WHERE id = $1", dataset_id))
+            table_name = updates.get("table_name") or (await conn.fetchval(
+                "SELECT table_name FROM core.problem_datasets WHERE id = $1", dataset_id))
+
+            schema_name = generate_schema_name()
+            try:
+                await conn.execute(f'CREATE SCHEMA "{schema_name}"')
+                await conn.execute(f'SET search_path TO "{schema_name}"')
+                await conn.execute(schema_sql)
+                await conn.execute(seed_sql)
+                records = await conn.fetch(f"SELECT * FROM {table_name} LIMIT 10")
+                sample_rows = [dict(r) for r in records]
+            finally:
+                await teardown_execution_schema(conn, schema_name)
+                await conn.execute('SET search_path TO public')
+
+            updates["sample_rows"] = json.dumps(sample_rows, default=json_serial)
+
+        if "column_types" in updates and isinstance(updates["column_types"], dict):
+            updates["column_types"] = json.dumps(updates["column_types"])
+
+        set_clauses = ", ".join(f"{k} = ${i+3}" for i, k in enumerate(updates))
+        values = list(updates.values())
+
+        result = await conn.execute(
+            f"UPDATE core.problem_datasets SET {set_clauses} WHERE id = $1 AND problem_id = $2",
+            dataset_id, problem_id, *values
+        )
+    if result == "UPDATE 0":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return {"status": "updated"}
+
+
+@router.delete("/problems/{problem_id}/datasets/{dataset_id}")
+async def delete_dataset(problem_id: str, dataset_id: str):
+    """Delete a dataset for a problem."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM core.problem_datasets WHERE id = $1 AND problem_id = $2",
+            dataset_id, problem_id
+        )
+    if result == "DELETE 0":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return {"status": "deleted"}
+
+
+@router.patch("/problems/{problem_id}/solution")
+async def edit_solution(problem_id: str, payload: dict):
+    """Edit the reference solution for a problem."""
+    allowed = {"reference_query", "order_sensitive", "notes"}
+    updates = {k: v for k, v in payload.items() if k in allowed}
+    if not updates:
+        return {"status": "no_changes"}
+
+    pool = await get_pool()
+    set_clauses = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(updates))
+    values = list(updates.values())
+
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            f"UPDATE core.problem_solutions SET {set_clauses} WHERE problem_id = $1",
+            problem_id, *values
+        )
+    if result == "UPDATE 0":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Solution not found")
+    return {"status": "updated"}
+
+
+# ============ ADMIN COMMENT MODERATION ============
+
+@router.delete("/comments/{comment_id}")
+async def admin_delete_comment(comment_id: str):
+    """Admin can delete any comment (bypasses ownership check)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM core.comments WHERE id = $1", comment_id
+        )
+    if result == "DELETE 0":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return {"status": "deleted"}
+
+
+@router.get("/problems/{problem_id}/comments")
+async def admin_get_comments(problem_id: str):
+    """Get all comments for a problem (admin view — includes user info for moderation)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                c.id, c.body, c.created_at, c.parent_id,
+                u.full_name, u.email, u.user_id
+            FROM core.comments c
+            JOIN core.users u ON c.user_id = u.user_id
+            WHERE c.problem_id = $1
+            ORDER BY c.created_at ASC
+            """,
+            problem_id
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "body": r["body"],
+            "created_at": r["created_at"].isoformat(),
+            "parent_id": str(r["parent_id"]) if r["parent_id"] else None,
+            "user": {
+                "user_id": str(r["user_id"]),
+                "full_name": r["full_name"] or r["email"].split("@")[0],
+                "email": r["email"],
+            },
+        }
+        for r in rows
+    ]
+
+
+# ============ ADMIN FEEDBACK VIEW ============
+
+@router.get("/feedback")
+async def admin_get_feedback():
+    """Get all user feedback for the admin panel."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                f.id, f.rating, f.message, f.source, f.created_at, f.email as anon_email,
+                u.email as user_email, u.full_name,
+                p.title as problem_title, p.id as problem_id
+            FROM core.feedback f
+            LEFT JOIN core.users u ON f.user_id = u.user_id
+            LEFT JOIN core.problems p ON f.problem_id = p.id
+            ORDER BY f.created_at DESC
+            LIMIT 500
+            """
+        )
+
+    rating_labels = {1: "Bad", 2: "Okay", 3: "Great"}
+
+    return [
+        {
+            "id": str(r["id"]),
+            "created_at": r["created_at"].isoformat(),
+            "user_email": r["user_email"] or r["anon_email"] or "Anonymous",
+            "user_name": r["full_name"] or (r["user_email"] or "").split("@")[0] or "Anonymous",
+            "rating": r["rating"],
+            "rating_label": rating_labels.get(r["rating"], "—"),
+            "source": r["source"],
+            "problem_title": r["problem_title"],
+            "problem_id": str(r["problem_id"]) if r["problem_id"] else None,
+            "message": r["message"],
+        }
+        for r in rows
+    ]
+

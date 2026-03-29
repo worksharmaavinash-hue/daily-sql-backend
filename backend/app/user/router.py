@@ -85,7 +85,7 @@ async def get_problem_datasets(problem_id: str):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT table_name, schema_sql, sample_rows, column_types
+            SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types
             FROM core.problem_datasets
             WHERE problem_id = $1
             """,
@@ -97,8 +97,10 @@ async def get_problem_datasets(problem_id: str):
 
     return [
         {
+            "id": str(r["id"]),
             "table_name": r["table_name"],
             "schema_sql": r["schema_sql"],
+            "seed_sql": r["seed_sql"],
             "sample_rows": json.loads(r["sample_rows"]) if isinstance(r["sample_rows"], str) else r["sample_rows"],
             "column_types": json.loads(r["column_types"]) if isinstance(r["column_types"], str) else r["column_types"],
         }
