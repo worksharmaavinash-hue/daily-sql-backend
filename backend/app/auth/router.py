@@ -33,6 +33,11 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
+# ── MojoAuth OTP Configuration ───────────────────────────────────────────────
+MOJOAUTH_API_KEY = os.getenv("MOJOAUTH_API_KEY")
+MOJOAUTH_BASE_URL = "https://api.mojoauth.com"
+
+
 # ── Request / Response models ─────────────────────────────────────────────────
 class RegisterRequest(BaseModel):
     email: EmailStr
@@ -42,6 +47,10 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class OTPSendRequest(BaseModel):
+    email: EmailStr
 
 
 class TokenResponse(BaseModel):
@@ -63,9 +72,60 @@ def _verify_password(plain: str, hashed: str) -> bool:
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@router.post("/register", response_model=TokenResponse, status_code=201)
+@router.post("/register")
 async def register(data: RegisterRequest):
-    """Create a new email/password account."""
+    """
+    Step 1 of Signup: Check if email exists and send OTP.
+    Does NOT create the user yet.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT user_id FROM core.users WHERE email = $1", data.email)
+        if existing:
+            raise HTTPException(status_code=409, detail="An account with this email already exists.")
+
+    if not MOJOAUTH_API_KEY:
+        raise HTTPException(status_code=501, detail="MojoAuth is not configured")
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{MOJOAUTH_BASE_URL}/users/emailotp",
+            headers={"X-API-Key": MOJOAUTH_API_KEY},
+            json={"email": data.email},
+        )
+
+    if resp.status_code != 200:
+        detail = resp.json().get("description", "Failed to send verification code")
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+
+    return {"state_id": resp.json().get("state_id"), "message": "Verification code sent to your email"}
+
+
+class RegisterVerifyRequest(BaseModel):
+    email: EmailStr
+    password: str
+    state_id: str
+    otp: str
+
+
+@router.post("/register/verify", response_model=TokenResponse, status_code=201)
+async def register_verify(data: RegisterVerifyRequest):
+    """
+    Step 2 of Signup: Verify OTP and create the account.
+    """
+    # 1. Verify OTP with MojoAuth
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{MOJOAUTH_BASE_URL}/users/emailotp/verify",
+            headers={"X-API-Key": MOJOAUTH_API_KEY},
+            json={"state_id": data.state_id, "otp": data.otp},
+        )
+
+    if resp.status_code != 200:
+        detail = resp.json().get("description", "Invalid or expired verification code")
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+
+    # 2. Create the user in DB
     if len(data.password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
 
@@ -85,10 +145,7 @@ async def register(data: RegisterRequest):
                 hashed,
             )
         except asyncpg.UniqueViolationError:
-            raise HTTPException(
-                status_code=409,
-                detail="An account with this email already exists.",
-            )
+            raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
     token = create_access_token(user_id, data.email)
     return TokenResponse(access_token=token)
@@ -229,3 +286,23 @@ async def google_callback(code: Optional[str] = None, state: Optional[str] = Non
     # Redirect to frontend callback page with the token as a query param
     # The frontend /auth/callback page will store this in a cookie
     return RedirectResponse(f"{FRONTEND_URL}/auth/callback?token={jwt_token}")
+
+
+@router.post("/otp/send")
+async def send_otp(data: OTPSendRequest):
+    """Generic endpoint to send OTP (can be used for resends)."""
+    if not MOJOAUTH_API_KEY:
+        raise HTTPException(status_code=501, detail="MojoAuth is not configured")
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{MOJOAUTH_BASE_URL}/users/emailotp",
+            headers={"X-API-Key": MOJOAUTH_API_KEY},
+            json={"email": data.email},
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail="Failed to send OTP")
+
+    return {"state_id": resp.json().get("state_id")}
+
