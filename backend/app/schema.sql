@@ -76,3 +76,37 @@ CREATE TABLE IF NOT EXISTS core.user_solutions (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     PRIMARY KEY (user_id, problem_id)
 );
+
+-- NEW: Per-user likes on problems (dislike repurposed as feedback trigger, not stored)
+CREATE TABLE IF NOT EXISTS core.problem_votes (
+    user_id    UUID NOT NULL REFERENCES core.users(user_id) ON DELETE CASCADE,
+    problem_id UUID NOT NULL REFERENCES core.problems(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (user_id, problem_id)
+);
+
+-- NEW: Discussion comments on problems (2-level nesting: comment -> reply only)
+CREATE TABLE IF NOT EXISTS core.comments (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    problem_id UUID NOT NULL REFERENCES core.problems(id) ON DELETE CASCADE,
+    user_id    UUID NOT NULL REFERENCES core.users(user_id) ON DELETE CASCADE,
+    parent_id  UUID REFERENCES core.comments(id) ON DELETE CASCADE,
+    body       TEXT NOT NULL CHECK (char_length(body) >= 1 AND char_length(body) <= 2000),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS comments_problem_id_idx ON core.comments(problem_id);
+CREATE INDEX IF NOT EXISTS comments_parent_id_idx ON core.comments(parent_id);
+
+-- NEW: User feedback (from FAB or dislike button)
+CREATE TABLE IF NOT EXISTS core.feedback (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    UUID REFERENCES core.users(user_id) ON DELETE SET NULL,
+    email      TEXT,
+    rating     SMALLINT CHECK (rating IN (1, 2, 3)),
+    message    TEXT,
+    source     TEXT NOT NULL DEFAULT 'fab' CHECK (source IN ('fab', 'dislike')),
+    problem_id UUID REFERENCES core.problems(id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
