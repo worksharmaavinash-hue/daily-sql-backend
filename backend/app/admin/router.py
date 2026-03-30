@@ -6,7 +6,9 @@ from app.admin.schemas import (
     ProblemCreate,
     DatasetCreate,
     SolutionCreate,
-    DailyPracticeCreate
+    DailyPracticeCreate,
+    WhitelistCreate,
+    WhitelistBulkCreate
 )
 from app.execution.schema_manager import generate_schema_name, teardown_execution_schema
 import json
@@ -477,4 +479,66 @@ async def admin_get_feedback():
         }
         for r in rows
     ]
+
+
+# ============ ADMIN WHITELIST MANAGEMENT ============
+
+@router.get("/whitelist")
+async def list_whitelist():
+    """List all whitelisted emails."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT email, created_at FROM core.whitelist ORDER BY created_at DESC"
+        )
+    return [
+        {"email": r["email"], "created_at": r["created_at"].isoformat()}
+        for r in rows
+    ]
+
+
+@router.post("/whitelist")
+async def add_to_whitelist(payload: WhitelistCreate):
+    """Add an email to the whitelist."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                "INSERT INTO core.whitelist (email) VALUES ($1)",
+                payload.email.lower().strip()
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=400, detail="Email already whitelisted")
+    return {"status": "added"}
+
+
+@router.delete("/whitelist/{email}")
+async def remove_from_whitelist(email: str):
+    """Remove an email from the whitelist."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM core.whitelist WHERE email = $1",
+            email.lower().strip()
+        )
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Email not found in whitelist")
+    return {"status": "removed"}
+
+
+@router.post("/whitelist/bulk")
+async def bulk_add_to_whitelist(payload: WhitelistBulkCreate):
+    """Bulk add emails to the whitelist."""
+    pool = await get_pool()
+    emails = [e.lower().strip() for e in payload.emails if e.strip()]
+    if not emails:
+        raise HTTPException(status_code=400, detail="No valid emails provided")
+
+    async with pool.acquire() as conn:
+        # Using executemany with ON CONFLICT DO NOTHING for efficiency and deduplication
+        await conn.executemany(
+            "INSERT INTO core.whitelist (email) VALUES ($1) ON CONFLICT DO NOTHING",
+            [(e,) for e in emails]
+        )
+    return {"status": "bulk_added", "count": len(emails)}
 

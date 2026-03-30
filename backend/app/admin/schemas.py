@@ -25,3 +25,9 @@ class DailyPracticeCreate(BaseModel):
     easy_problem_id: UUID
     medium_problem_id: UUID
     advanced_problem_id: UUID
+
+class WhitelistCreate(BaseModel):
+    email: str
+
+class WhitelistBulkCreate(BaseModel):
+    emails: List[str]

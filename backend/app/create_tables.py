@@ -23,6 +23,11 @@ async def init_db():
                 ALTER TABLE core.users ADD COLUMN IF NOT EXISTS hashed_password TEXT;
                 ALTER TABLE core.users ADD COLUMN IF NOT EXISTS auth_provider TEXT DEFAULT 'email';
                 ALTER TABLE core.users ADD COLUMN IF NOT EXISTS provider_id TEXT;
+                ALTER TABLE core.problem_datasets ADD COLUMN IF NOT EXISTS column_types JSONB NOT NULL DEFAULT '{}'::jsonb;
+                CREATE TABLE IF NOT EXISTS core.whitelist (
+                    email TEXT PRIMARY KEY,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
             """)
             print("Migrations applied successfully.")
         except Exception as e:

@@ -110,3 +110,9 @@ CREATE TABLE IF NOT EXISTS core.feedback (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Whitelist for authorized emails
+CREATE TABLE IF NOT EXISTS core.whitelist (
+    email TEXT PRIMARY KEY,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
