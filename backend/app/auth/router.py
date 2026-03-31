@@ -5,13 +5,13 @@ from typing import Optional
 import asyncpg
 import httpx
 from authlib.integrations.starlette_client import OAuth
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import RedirectResponse
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr
 
-from app.auth.jwt import create_access_token
+from app.auth.jwt import create_access_token, verify_admin_jwt
 from app.db import get_pool
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -92,7 +92,7 @@ async def register(data: RegisterRequest):
     if not MOJOAUTH_API_KEY:
         raise HTTPException(status_code=501, detail="MojoAuth is not configured")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=False) as client:
         resp = await client.post(
             f"{MOJOAUTH_BASE_URL}/users/emailotp",
             headers={"X-API-Key": MOJOAUTH_API_KEY},
@@ -119,7 +119,7 @@ async def register_verify(data: RegisterVerifyRequest):
     Step 2 of Signup: Verify OTP and create the account.
     """
     # 1. Verify OTP with MojoAuth
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=False) as client:
         resp = await client.post(
             f"{MOJOAUTH_BASE_URL}/users/emailotp/verify",
             headers={"X-API-Key": MOJOAUTH_API_KEY},
@@ -309,7 +309,7 @@ async def send_otp(data: OTPSendRequest):
     if not MOJOAUTH_API_KEY:
         raise HTTPException(status_code=501, detail="MojoAuth is not configured")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=False) as client:
         resp = await client.post(
             f"{MOJOAUTH_BASE_URL}/users/emailotp",
             headers={"X-API-Key": MOJOAUTH_API_KEY},
@@ -320,4 +320,59 @@ async def send_otp(data: OTPSendRequest):
         raise HTTPException(status_code=resp.status_code, detail="Failed to send OTP")
 
     return {"state_id": resp.json().get("state_id")}
+
+
+# ── Admin OTP Authentication ──────────────────────────────────────────────────
+
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
+
+class AdminVerifyRequest(BaseModel):
+    email: EmailStr
+    state_id: str
+    otp: str
+
+@router.post("/admin/otp/send")
+async def send_admin_otp(data: OTPSendRequest):
+    """Send OTP only if email matches ADMIN_EMAIL."""
+    if not ADMIN_EMAIL:
+        raise HTTPException(status_code=500, detail="ADMIN_EMAIL not configured on server")
+    
+    if data.email.lower().strip() != ADMIN_EMAIL.lower().strip():
+        raise HTTPException(status_code=403, detail="Unrecognized admin email")
+
+    if not MOJOAUTH_API_KEY:
+        raise HTTPException(status_code=501, detail="MojoAuth is not configured")
+
+    async with httpx.AsyncClient(verify=False) as client:
+        resp = await client.post(
+            f"{MOJOAUTH_BASE_URL}/users/emailotp",
+            headers={"X-API-Key": MOJOAUTH_API_KEY},
+            json={"email": data.email},
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail="Failed to send admin code")
+
+    return {"state_id": resp.json().get("state_id")}
+
+@router.post("/admin/otp/verify")
+async def verify_admin_otp(data: AdminVerifyRequest):
+    """Verify admin OTP and return a JWT with is_admin=True."""
+    if not ADMIN_EMAIL or data.email.lower().strip() != ADMIN_EMAIL.lower().strip():
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    async with httpx.AsyncClient(verify=False) as client:
+        resp = await client.post(
+            f"{MOJOAUTH_BASE_URL}/users/emailotp/verify",
+            headers={"X-API-Key": MOJOAUTH_API_KEY},
+            json={"state_id": data.state_id, "otp": data.otp},
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail="Invalid verification code")
+
+    # Generate a token with is_admin=True
+    # We use a special UUID for the 'sub' to denote the system admin
+    admin_token = create_access_token(user_id="00000000-0000-0000-0000-000000000000", email=data.email, is_admin=True)
+    return {"access_token": admin_token, "token_type": "bearer"}
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Security
+from fastapi import APIRouter, Depends, HTTPException, Security, Request
 from fastapi.security.api_key import APIKeyHeader
 from uuid import uuid4
 from app.db import get_pool
@@ -11,6 +11,7 @@ from app.admin.schemas import (
     WhitelistBulkCreate
 )
 from app.execution.schema_manager import generate_schema_name, teardown_execution_schema
+from app.auth.jwt import _decode_token
 import json
 import os
 from datetime import date, datetime
@@ -31,12 +32,24 @@ def json_serial(obj):
 API_KEY_NAME = "X-Admin-Secret"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
-async def get_admin_api_key(api_key: str = Security(api_key_header)):
-    # Default to 'admin_secret' for local if env not set
+async def get_admin_api_key(request: Request, api_key: str = Security(api_key_header)):
+    # 1. Check legacy X-Admin-Secret header
     expected_secret = os.getenv("ADMIN_SECRET", "admin_secret")
-    if api_key == expected_secret:
+    if api_key and api_key == expected_secret:
         return api_key
-    raise HTTPException(status_code=403, detail="Could not validate credentials")
+    
+    # 2. Check for Authorization: Bearer <token>
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+        try:
+            payload = _decode_token(token)
+            if payload.get("admin") is True:
+                return token
+        except Exception:
+            pass
+
+    raise HTTPException(status_code=403, detail="Admin access required")
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_admin_api_key)])
 
