@@ -9,9 +9,6 @@ from app.comments.router import router as comments_router
 from app.feedback.router import router as feedback_router
 import os
 
-
-import os
-
 app = FastAPI()
 
 # CORS origins: configurable via CORS_ORIGINS env var (comma-separated)
