@@ -26,6 +26,26 @@ async def get_today_practice():
     today = date.today()
 
     async with pool.acquire() as conn:
+        # Cleanup: Remove schedules older than 7 days and permanently publish those problems
+        await conn.execute(
+            """
+            WITH deleted AS (
+                DELETE FROM core.daily_practice 
+                WHERE date < CURRENT_DATE - INTERVAL '7 days'
+                RETURNING easy_problem_id, medium_problem_id, advanced_problem_id
+            )
+            UPDATE core.problems
+            SET is_active = true
+            WHERE id IN (
+                SELECT easy_problem_id FROM deleted WHERE easy_problem_id IS NOT NULL
+                UNION
+                SELECT medium_problem_id FROM deleted WHERE medium_problem_id IS NOT NULL
+                UNION
+                SELECT advanced_problem_id FROM deleted WHERE advanced_problem_id IS NOT NULL
+            )
+            """
+        )
+
         # Try today first
         row = await conn.fetchrow(
             """
@@ -66,7 +86,11 @@ async def get_problem(problem_id: str):
             """
             SELECT id, title, difficulty, description, estimated_time_minutes
             FROM core.problems
-            WHERE id = $1 AND is_active = true
+            WHERE id = $1 AND (is_active = true OR EXISTS (
+                SELECT 1 FROM core.daily_practice 
+                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                AND date <= CURRENT_DATE
+            ))
             """,
             problem_id,
         )
@@ -84,7 +108,11 @@ async def list_problems():
             """
             SELECT id, title, difficulty, description, estimated_time_minutes
             FROM core.problems
-            WHERE is_active = true
+            WHERE is_active = true OR EXISTS (
+                SELECT 1 FROM core.daily_practice 
+                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                AND date <= CURRENT_DATE
+            )
             ORDER BY created_at DESC
             """
         )
@@ -302,7 +330,11 @@ async def get_my_stats(user=Depends(verify_jwt)):
             """
             SELECT difficulty, COUNT(*) as total
             FROM core.problems
-            WHERE is_active = true
+            WHERE is_active = true OR EXISTS (
+                SELECT 1 FROM core.daily_practice 
+                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                AND date <= CURRENT_DATE
+            )
             GROUP BY difficulty
             """
         )
