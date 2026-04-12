@@ -62,6 +62,20 @@ async def list_problems():
     """List ALL problems (including drafts) for admin view"""
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # Sync: Permanently publish (undraft) problems as soon as their scheduled date is reached
+        await conn.execute(
+            """
+            UPDATE core.problems
+            SET is_active = true
+            WHERE id IN (
+                SELECT easy_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
+                UNION
+                SELECT medium_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
+                UNION
+                SELECT advanced_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
+            ) AND is_active = false
+            """
+        )
         rows = await conn.fetch(
             """
             SELECT id, title, difficulty, description, estimated_time_minutes, is_active, created_at

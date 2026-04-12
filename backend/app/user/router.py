@@ -27,17 +27,17 @@ async def get_today_practice():
 
     async with pool.acquire() as conn:
         # Cleanup & Publish Logic: 
-        # 1. Permanently publish (undraft) problems as soon as their scheduled date has passed
+        # 1. Permanently publish (undraft) problems as soon as their scheduled date is reached
         await conn.execute(
             """
             UPDATE core.problems
             SET is_active = true
             WHERE id IN (
-                SELECT easy_problem_id FROM core.daily_practice WHERE date < CURRENT_DATE
+                SELECT easy_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
                 UNION
-                SELECT medium_problem_id FROM core.daily_practice WHERE date < CURRENT_DATE
+                SELECT medium_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
                 UNION
-                SELECT advanced_problem_id FROM core.daily_practice WHERE date < CURRENT_DATE
+                SELECT advanced_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
             ) AND is_active = false
             """
         )
