@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS core.users (
     occupation TEXT,
     job_role TEXT,
     experience_years INTEGER,
+    avatar_url TEXT,
     onboarding_completed BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

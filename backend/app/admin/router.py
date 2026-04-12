@@ -59,14 +59,13 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_ad
 
 @router.get("/problems")
 async def list_problems():
-    """List all problems for admin selection dropdowns"""
+    """List ALL problems (including drafts) for admin view"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, title, difficulty, description, estimated_time_minutes, created_at
+            SELECT id, title, difficulty, description, estimated_time_minutes, is_active, created_at
             FROM core.problems
-            WHERE is_active = true
             ORDER BY created_at DESC
             """
         )
@@ -77,6 +76,7 @@ async def list_problems():
             "difficulty": r["difficulty"],
             "description": r["description"][:100] + "..." if len(r["description"]) > 100 else r["description"],
             "estimated_time_minutes": r["estimated_time_minutes"],
+            "is_active": r["is_active"],
             "created_at": r["created_at"].isoformat() if r["created_at"] else None
         }
         for r in rows
@@ -109,6 +109,7 @@ async def get_problem_details(problem_id: str):
         "difficulty": problem["difficulty"],
         "description": problem["description"],
         "estimated_time_minutes": problem["estimated_time_minutes"],
+        "is_active": problem["is_active"],
         "datasets": [
             {
                 "id": str(d["id"]),
@@ -196,14 +197,15 @@ async def create_problem(payload: ProblemCreate):
         await conn.execute(
             """
             INSERT INTO core.problems
-            (id, title, difficulty, description, estimated_time_minutes)
-            VALUES ($1, $2, $3, $4, $5)
+            (id, title, difficulty, description, estimated_time_minutes, is_active)
+            VALUES ($1, $2, $3, $4, $5, $6)
             """,
             problem_id,
             payload.title,
             payload.difficulty,
             payload.description,
             payload.estimated_time_minutes,
+            False,  # New problems start as drafts
         )
 
     return {"problem_id": str(problem_id)}
@@ -296,8 +298,8 @@ async def schedule_daily_practice(payload: DailyPracticeCreate):
 
 @router.patch("/problems/{problem_id}")
 async def edit_problem(problem_id: str, payload: dict):
-    """Edit an existing problem's metadata."""
-    allowed = {"title", "difficulty", "description", "estimated_time_minutes"}
+    """Edit an existing problem's metadata, including publish/draft status."""
+    allowed = {"title", "difficulty", "description", "estimated_time_minutes", "is_active"}
     updates = {k: v for k, v in payload.items() if k in allowed}
     if not updates:
         return {"status": "no_changes"}

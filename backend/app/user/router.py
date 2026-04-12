@@ -1,10 +1,22 @@
 import json
+import os
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import date
 from app.db import get_pool
 from app.auth.jwt import verify_jwt
 from pydantic import BaseModel
 from typing import Optional, List
+import time
+from app.user.cloudinary_utils import generate_cloudinary_signature
+
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
+
+# Validate Cloudinary credentials on startup
+if not all([CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET]):
+    print("Warning: Cloudinary credentials not fully configured in environment variables.")
+
 
 router = APIRouter(prefix="", tags=["user"])
 
@@ -192,6 +204,7 @@ class ProfileUpdate(BaseModel):
     occupation: Optional[str] = None
     job_role: Optional[str] = None
     experience_years: Optional[int] = None
+    avatar_url: Optional[str] = None
 
 @router.get("/me/profile")
 async def get_my_profile(user=Depends(verify_jwt)):
@@ -201,7 +214,7 @@ async def get_my_profile(user=Depends(verify_jwt)):
     async with pool.acquire() as conn:
         profile = await conn.fetchrow(
             """
-            SELECT user_id, email, full_name, occupation, job_role, experience_years, onboarding_completed, created_at
+            SELECT user_id, email, full_name, occupation, job_role, experience_years, avatar_url, onboarding_completed, created_at
             FROM core.users
             WHERE user_id = $1
             """,
@@ -228,13 +241,14 @@ async def update_my_profile(data: ProfileUpdate, user=Depends(verify_jwt)):
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO core.users (user_id, email, full_name, occupation, job_role, experience_years, onboarding_completed)
-            VALUES ($1, $2, $3, $4, $5, $6, true)
+            INSERT INTO core.users (user_id, email, full_name, occupation, job_role, experience_years, avatar_url, onboarding_completed)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, true)
             ON CONFLICT (user_id) DO UPDATE SET
                 full_name = COALESCE(EXCLUDED.full_name, core.users.full_name),
                 occupation = COALESCE(EXCLUDED.occupation, core.users.occupation),
                 job_role = COALESCE(EXCLUDED.job_role, core.users.job_role),
                 experience_years = COALESCE(EXCLUDED.experience_years, core.users.experience_years),
+                avatar_url = COALESCE(EXCLUDED.avatar_url, core.users.avatar_url),
                 onboarding_completed = true
             """,
             user_id,
@@ -242,7 +256,8 @@ async def update_my_profile(data: ProfileUpdate, user=Depends(verify_jwt)):
             data.full_name,
             data.occupation,
             data.job_role,
-            data.experience_years
+            data.experience_years,
+            data.avatar_url
         )
 
     return {"status": "success"}
@@ -357,3 +372,30 @@ async def get_practice_heatmap(user=Depends(verify_jwt)):
         )
 
     return {str(r["attempt_date"]): r["count"] for r in rows}
+
+@router.get("/me/cloudinary-signature")
+async def get_cloudinary_signature(user=Depends(verify_jwt)):
+    user_id = user["user_id"]
+    timestamp = int(time.time())
+    
+    # We use user_id in public_id for uniqueness/identification
+    public_id = f"user_{user_id.replace('-', '_')}"
+    folder = "profile_photos"
+    
+    params = {
+        "timestamp": timestamp,
+        "public_id": public_id,
+        "folder": folder
+    }
+    
+    signature = generate_cloudinary_signature(params, CLOUDINARY_API_SECRET)
+    
+    return {
+        "signature": signature,
+        "timestamp": timestamp,
+        "api_key": CLOUDINARY_API_KEY,
+        "cloud_name": CLOUDINARY_CLOUD_NAME,
+        "public_id": public_id,
+        "folder": folder
+    }
+
