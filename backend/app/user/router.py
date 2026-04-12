@@ -26,24 +26,25 @@ async def get_today_practice():
     today = date.today()
 
     async with pool.acquire() as conn:
-        # Cleanup: Remove schedules older than 7 days and permanently publish those problems
+        # Cleanup & Publish Logic: 
+        # 1. Permanently publish (undraft) problems as soon as their scheduled date has passed
         await conn.execute(
             """
-            WITH deleted AS (
-                DELETE FROM core.daily_practice 
-                WHERE date < CURRENT_DATE - INTERVAL '7 days'
-                RETURNING easy_problem_id, medium_problem_id, advanced_problem_id
-            )
             UPDATE core.problems
             SET is_active = true
             WHERE id IN (
-                SELECT easy_problem_id FROM deleted WHERE easy_problem_id IS NOT NULL
+                SELECT easy_problem_id FROM core.daily_practice WHERE date < CURRENT_DATE
                 UNION
-                SELECT medium_problem_id FROM deleted WHERE medium_problem_id IS NOT NULL
+                SELECT medium_problem_id FROM core.daily_practice WHERE date < CURRENT_DATE
                 UNION
-                SELECT advanced_problem_id FROM deleted WHERE advanced_problem_id IS NOT NULL
-            )
+                SELECT advanced_problem_id FROM core.daily_practice WHERE date < CURRENT_DATE
+            ) AND is_active = false
             """
+        )
+        
+        # 2. Remove schedule history records older than 7 days (as requested)
+        await conn.execute(
+            "DELETE FROM core.daily_practice WHERE date < CURRENT_DATE - INTERVAL '7 days'"
         )
 
         # Try today first
