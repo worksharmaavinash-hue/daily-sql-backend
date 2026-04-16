@@ -68,11 +68,11 @@ async def list_problems():
             UPDATE core.problems
             SET is_active = true
             WHERE id IN (
-                SELECT easy_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
+                SELECT easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
                 UNION
-                SELECT medium_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
+                SELECT medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
                 UNION
-                SELECT advanced_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
+                SELECT advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ) AND is_active = false
             """
         )
@@ -159,7 +159,7 @@ async def list_schedule():
             LEFT JOIN core.problems p1 ON dp.easy_problem_id = p1.id
             LEFT JOIN core.problems p2 ON dp.medium_problem_id = p2.id
             LEFT JOIN core.problems p3 ON dp.advanced_problem_id = p3.id
-            WHERE dp.date >= CURRENT_DATE - INTERVAL '7 days'
+            WHERE dp.date >= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date - INTERVAL '7 days'
             ORDER BY dp.date DESC
             """
         )

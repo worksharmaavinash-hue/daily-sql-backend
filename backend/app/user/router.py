@@ -8,6 +8,13 @@ from pydantic import BaseModel
 from typing import Optional, List
 import time
 from app.user.cloudinary_utils import generate_cloudinary_signature
+from datetime import datetime, timedelta
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
 
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
@@ -23,7 +30,7 @@ router = APIRouter(prefix="", tags=["user"])
 @router.get("/practice/today")
 async def get_today_practice():
     pool = await get_pool()
-    today = date.today()
+    today = (datetime.now(IST) - timedelta(hours=1)).date()
 
     async with pool.acquire() as conn:
         # Cleanup & Publish Logic: 
@@ -33,18 +40,18 @@ async def get_today_practice():
             UPDATE core.problems
             SET is_active = true
             WHERE id IN (
-                SELECT easy_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
+                SELECT easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
                 UNION
-                SELECT medium_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
+                SELECT medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
                 UNION
-                SELECT advanced_problem_id FROM core.daily_practice WHERE date <= CURRENT_DATE
+                SELECT advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ) AND is_active = false
             """
         )
         
         # 2. Remove schedule history records older than 7 days (as requested)
         await conn.execute(
-            "DELETE FROM core.daily_practice WHERE date < CURRENT_DATE - INTERVAL '7 days'"
+            "DELETE FROM core.daily_practice WHERE date < ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date - INTERVAL '7 days'"
         )
 
         # Try today first
@@ -57,15 +64,17 @@ async def get_today_practice():
             today,
         )
 
-        # Fallback to latest
+        # Fallback to latest past/current
         if not row:
             row = await conn.fetchrow(
                 """
                 SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id
                 FROM core.daily_practice
+                WHERE date <= $1
                 ORDER BY date DESC
                 LIMIT 1
-                """
+                """,
+                today,
             )
 
     if not row:
@@ -90,7 +99,7 @@ async def get_problem(problem_id: str):
             WHERE id = $1 AND (is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
                 WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
-                AND date <= CURRENT_DATE
+                AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ))
             """,
             problem_id,
@@ -112,7 +121,7 @@ async def list_problems():
             WHERE is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
                 WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
-                AND date <= CURRENT_DATE
+                AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
             ORDER BY created_at DESC
             """
@@ -206,7 +215,7 @@ async def get_my_streak(user=Depends(verify_jwt)):
 async def get_today_attempts(user=Depends(verify_jwt)):
     pool = await get_pool()
     user_id = user["user_id"]
-    today = date.today()
+    today = (datetime.now(IST) - timedelta(hours=1)).date()
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -334,7 +343,7 @@ async def get_my_stats(user=Depends(verify_jwt)):
             WHERE is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
                 WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
-                AND date <= CURRENT_DATE
+                AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
             GROUP BY difficulty
             """
