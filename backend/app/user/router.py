@@ -415,6 +415,57 @@ async def get_practice_heatmap(user=Depends(verify_jwt)):
 
     return {str(r["attempt_date"]): r["count"] for r in rows}
 
+@router.get("/leaderboard")
+async def get_leaderboard():
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                u.user_id,
+                u.full_name,
+                u.avatar_url,
+                u.job_role,
+                u.occupation,
+                COUNT(DISTINCT us.problem_id) AS total_solved,
+                COALESCE(s.current_streak, 0) AS current_streak
+            FROM core.user_solutions us
+            JOIN core.users u ON us.user_id = u.user_id
+            LEFT JOIN core.streaks s ON u.user_id = s.user_id
+            GROUP BY u.user_id, u.full_name, u.avatar_url, u.job_role, u.occupation, s.current_streak
+            ORDER BY total_solved DESC, current_streak DESC
+            LIMIT 20
+            """
+        )
+
+    return [
+        {
+            "user_id": str(r["user_id"]),
+            "full_name": r["full_name"] or "Anonymous",
+            "avatar_url": r["avatar_url"],
+            "job_role": r["job_role"] or r["occupation"] or "Member",
+            "total_solved": r["total_solved"],
+            "current_streak": r["current_streak"],
+        }
+        for r in rows
+    ]
+
+
+@router.get("/me/solved-ids")
+async def get_my_solved_ids(user=Depends(verify_jwt)):
+    pool = await get_pool()
+    user_id = user["user_id"]
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT problem_id FROM core.user_solutions WHERE user_id = $1",
+            user_id,
+        )
+
+    return {"solved_ids": [str(r["problem_id"]) for r in rows]}
+
+
 @router.get("/me/cloudinary-signature")
 async def get_cloudinary_signature(user=Depends(verify_jwt)):
     user_id = user["user_id"]
