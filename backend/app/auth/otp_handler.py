@@ -3,9 +3,9 @@ import uuid
 from app.db import get_redis
 
 async def create_otp_session(email: str) -> tuple[str, str]:
-    """Generates a 6-digit OTP and stores it in Redis with a state_id."""
+    """Generates a 4-digit OTP and stores it in Redis with a state_id."""
     redis = await get_redis()
-    otp = "".join([str(random.randint(0, 9)) for _ in range(6)])
+    otp = "".join([str(random.randint(0, 9)) for _ in range(4)])
     state_id = str(uuid.uuid4())
     
     # Store OTP with state_id as key, and also store email
