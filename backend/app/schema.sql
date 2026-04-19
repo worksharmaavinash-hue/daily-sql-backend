@@ -117,3 +117,17 @@ CREATE TABLE IF NOT EXISTS core.whitelist (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Waitlist for new signups
+CREATE TABLE IF NOT EXISTS core.waitlist (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT UNIQUE NOT NULL,
+    full_name TEXT NOT NULL,
+    whatsapp_number TEXT,
+    occupation TEXT,
+    job_role TEXT,
+    experience_years INTEGER,
+    source TEXT,
+    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+

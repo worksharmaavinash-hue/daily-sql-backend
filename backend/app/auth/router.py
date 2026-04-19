@@ -55,6 +55,16 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class WaitlistJoinRequest(BaseModel):
+    email: EmailStr
+    full_name: str
+    whatsapp_number: Optional[str] = None
+    occupation: Optional[str] = None
+    job_role: Optional[str] = None
+    experience_years: Optional[int] = None
+    source: Optional[str] = None
+
+
 # ── Password hashing ──────────────────────────────────────────────────────────
 def _hash_password(plain: str) -> str:
     salt = bcrypt.gensalt()
@@ -300,6 +310,40 @@ async def send_otp(data: OTPSendRequest):
         raise HTTPException(status_code=500, detail="Failed to send OTP")
 
     return {"state_id": state_id}
+
+
+@router.post("/waitlist/join", status_code=201)
+async def join_waitlist(data: WaitlistJoinRequest):
+    """Public endpoint to join the waitlist."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                """
+                INSERT INTO core.waitlist 
+                    (email, full_name, whatsapp_number, occupation, job_role, experience_years, source)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (email) DO UPDATE SET
+                    full_name = EXCLUDED.full_name,
+                    whatsapp_number = COALESCE(EXCLUDED.whatsapp_number, core.waitlist.whatsapp_number),
+                    occupation = COALESCE(EXCLUDED.occupation, core.waitlist.occupation),
+                    job_role = COALESCE(EXCLUDED.job_role, core.waitlist.job_role),
+                    experience_years = COALESCE(EXCLUDED.experience_years, core.waitlist.experience_years),
+                    source = COALESCE(EXCLUDED.source, core.waitlist.source),
+                    status = 'pending'
+                """,
+                data.email.lower().strip(),
+                data.full_name,
+                data.whatsapp_number,
+                data.occupation,
+                data.job_role,
+                data.experience_years,
+                data.source,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    return {"message": "Successfully joined the waitlist"}
 
 
 # ── Admin OTP Authentication ──────────────────────────────────────────────────
