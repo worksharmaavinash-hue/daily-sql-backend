@@ -13,6 +13,8 @@ from pydantic import BaseModel, EmailStr
 
 from app.auth.jwt import create_access_token, verify_admin_jwt
 from app.db import get_pool
+from app.auth.otp_handler import create_otp_session, verify_otp_session
+from app.services.mail_service import send_otp_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -31,11 +33,6 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
-
-
-# ── MojoAuth OTP Configuration ───────────────────────────────────────────────
-MOJOAUTH_API_KEY = os.getenv("MOJOAUTH_API_KEY")
-MOJOAUTH_BASE_URL = "https://api.mojoauth.com"
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -89,21 +86,18 @@ async def register(data: RegisterRequest):
         if existing:
             raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
-    if not MOJOAUTH_API_KEY:
-        raise HTTPException(status_code=501, detail="MojoAuth is not configured")
+    # 1. Internal OTP Generation
+    state_id, otp = await create_otp_session(data.email)
 
-    async with httpx.AsyncClient(verify=False) as client:
-        resp = await client.post(
-            f"{MOJOAUTH_BASE_URL}/users/emailotp",
-            headers={"X-API-Key": MOJOAUTH_API_KEY},
-            json={"email": data.email},
+    # 2. Send Email
+    sent = await send_otp_email(data.email, otp)
+    if not sent:
+        raise HTTPException(
+            status_code=500, 
+            detail="Failed to send verification email. Please contact support."
         )
 
-    if resp.status_code != 200:
-        detail = resp.json().get("description", "Failed to send verification code")
-        raise HTTPException(status_code=resp.status_code, detail=detail)
-
-    return {"state_id": resp.json().get("state_id"), "message": "Verification code sent to your email"}
+    return {"state_id": state_id, "message": "Verification code sent to your email"}
 
 
 class RegisterVerifyRequest(BaseModel):
@@ -118,17 +112,11 @@ async def register_verify(data: RegisterVerifyRequest):
     """
     Step 2 of Signup: Verify OTP and create the account.
     """
-    # 1. Verify OTP with MojoAuth
-    async with httpx.AsyncClient(verify=False) as client:
-        resp = await client.post(
-            f"{MOJOAUTH_BASE_URL}/users/emailotp/verify",
-            headers={"X-API-Key": MOJOAUTH_API_KEY},
-            json={"state_id": data.state_id, "otp": data.otp},
-        )
+    # 1. Verify OTP with our internal handler
+    verified = await verify_otp_session(data.state_id, data.otp, data.email)
 
-    if resp.status_code != 200:
-        detail = resp.json().get("description", "Invalid or expired verification code")
-        raise HTTPException(status_code=resp.status_code, detail=detail)
+    if not verified:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification code")
 
     # 2. Create the user in DB
     if len(data.password) < 8:
@@ -306,20 +294,12 @@ async def google_callback(code: Optional[str] = None, state: Optional[str] = Non
 @router.post("/otp/send")
 async def send_otp(data: OTPSendRequest):
     """Generic endpoint to send OTP (can be used for resends)."""
-    if not MOJOAUTH_API_KEY:
-        raise HTTPException(status_code=501, detail="MojoAuth is not configured")
+    state_id, otp = await create_otp_session(data.email)
+    sent = await send_otp_email(data.email, otp)
+    if not sent:
+        raise HTTPException(status_code=500, detail="Failed to send OTP")
 
-    async with httpx.AsyncClient(verify=False) as client:
-        resp = await client.post(
-            f"{MOJOAUTH_BASE_URL}/users/emailotp",
-            headers={"X-API-Key": MOJOAUTH_API_KEY},
-            json={"email": data.email},
-        )
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail="Failed to send OTP")
-
-    return {"state_id": resp.json().get("state_id")}
+    return {"state_id": state_id}
 
 
 # ── Admin OTP Authentication ──────────────────────────────────────────────────
@@ -340,20 +320,12 @@ async def send_admin_otp(data: OTPSendRequest):
     if data.email.lower().strip() != ADMIN_EMAIL.lower().strip():
         raise HTTPException(status_code=403, detail="Unrecognized admin email")
 
-    if not MOJOAUTH_API_KEY:
-        raise HTTPException(status_code=501, detail="MojoAuth is not configured")
+    state_id, otp = await create_otp_session(data.email)
+    sent = await send_otp_email(data.email, otp)
+    if not sent:
+        raise HTTPException(status_code=500, detail="Failed to send admin code")
 
-    async with httpx.AsyncClient(verify=False) as client:
-        resp = await client.post(
-            f"{MOJOAUTH_BASE_URL}/users/emailotp",
-            headers={"X-API-Key": MOJOAUTH_API_KEY},
-            json={"email": data.email},
-        )
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail="Failed to send admin code")
-
-    return {"state_id": resp.json().get("state_id")}
+    return {"state_id": state_id}
 
 @router.post("/admin/otp/verify")
 async def verify_admin_otp(data: AdminVerifyRequest):
@@ -361,15 +333,9 @@ async def verify_admin_otp(data: AdminVerifyRequest):
     if not ADMIN_EMAIL or data.email.lower().strip() != ADMIN_EMAIL.lower().strip():
         raise HTTPException(status_code=403, detail="Unauthorized")
 
-    async with httpx.AsyncClient(verify=False) as client:
-        resp = await client.post(
-            f"{MOJOAUTH_BASE_URL}/users/emailotp/verify",
-            headers={"X-API-Key": MOJOAUTH_API_KEY},
-            json={"state_id": data.state_id, "otp": data.otp},
-        )
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail="Invalid verification code")
+    verified = await verify_otp_session(data.state_id, data.otp, data.email)
+    if not verified:
+        raise HTTPException(status_code=400, detail="Invalid verification code")
 
     # Generate a token with is_admin=True
     # We use a special UUID for the 'sub' to denote the system admin
