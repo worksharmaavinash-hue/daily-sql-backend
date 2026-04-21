@@ -45,6 +45,15 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+class WaitlistRequest(BaseModel):
+    email: EmailStr
+    full_name: str
+    whatsapp_number: str
+    occupation: Optional[str] = None
+    job_role: Optional[str] = None
+    experience_years: Optional[int] = None
+    source: Optional[str] = None
+
 
 class OTPSendRequest(BaseModel):
     email: EmailStr
@@ -342,3 +351,31 @@ async def verify_admin_otp(data: AdminVerifyRequest):
     admin_token = create_access_token(user_id="00000000-0000-0000-0000-000000000000", email=data.email, is_admin=True)
     return {"access_token": admin_token, "token_type": "bearer"}
 
+
+@router.post("/waitlist/join")
+async def join_waitlist(data: WaitlistRequest):
+    """Adds a new entry to the waitlist."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                """
+                INSERT INTO core.waitlist 
+                (email, full_name, whatsapp_number, occupation, job_role, experience_years, source)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                data.email.lower().strip(),
+                data.full_name,
+                data.whatsapp_number,
+                data.occupation,
+                data.job_role,
+                data.experience_years,
+                data.source
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=400, detail="This email is already on the waitlist.")
+        except Exception as e:
+            print(f"Error joining waitlist: {e}")
+            raise HTTPException(status_code=500, detail="Failed to join waitlist.")
+            
+    return {"message": "Success! You have been added to the waitlist."}

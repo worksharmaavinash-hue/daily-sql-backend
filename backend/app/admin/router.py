@@ -572,3 +572,40 @@ async def bulk_add_to_whitelist(payload: WhitelistBulkCreate):
         )
     return {"status": "bulk_added", "count": len(emails)}
 
+
+@router.get("/waitlist")
+async def list_waitlist():
+    """List all users on the waitlist."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM core.waitlist ORDER BY created_at DESC"
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "email": r["email"],
+            "full_name": r["full_name"],
+            "whatsapp_number": r["whatsapp_number"],
+            "occupation": r["occupation"],
+            "job_role": r["job_role"],
+            "experience_years": r["experience_years"],
+            "source": r["source"],
+            "created_at": r["created_at"].isoformat()
+        }
+        for r in rows
+    ]
+
+
+@router.delete("/waitlist/{waitlist_id}")
+async def remove_from_waitlist(waitlist_id: str):
+    """Remove an entry from the waitlist."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM core.waitlist WHERE id = $1",
+            waitlist_id
+        )
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Entry not found")
+    return {"status": "removed"}
