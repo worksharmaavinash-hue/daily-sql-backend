@@ -243,6 +243,11 @@ class ProfileUpdate(BaseModel):
     job_role: Optional[str] = None
     experience_years: Optional[int] = None
     avatar_url: Optional[str] = None
+    username: Optional[str] = None
+    is_public_profile: Optional[bool] = None
+    bio: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    github_url: Optional[str] = None
 
 @router.get("/me/profile")
 async def get_my_profile(user=Depends(verify_jwt)):
@@ -252,7 +257,8 @@ async def get_my_profile(user=Depends(verify_jwt)):
     async with pool.acquire() as conn:
         profile = await conn.fetchrow(
             """
-            SELECT user_id, email, full_name, occupation, job_role, experience_years, avatar_url, onboarding_completed, created_at
+            SELECT user_id, email, full_name, occupation, job_role, experience_years, avatar_url, onboarding_completed, created_at,
+                   username, is_public_profile, bio, linkedin_url, github_url
             FROM core.users
             WHERE user_id = $1
             """,
@@ -267,36 +273,128 @@ async def get_my_profile(user=Depends(verify_jwt)):
         **dict(profile)
     }
 
+@router.get("/u/{username}")
+async def get_public_profile(username: str):
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        profile = await conn.fetchrow(
+            """
+            SELECT u.user_id, u.full_name, u.avatar_url, u.job_role, u.occupation, u.bio, u.linkedin_url, u.github_url,
+                   u.is_public_profile, u.created_at,
+                   COALESCE(s.current_streak, 0) AS current_streak
+            FROM core.users u
+            LEFT JOIN core.streaks s ON u.user_id = s.user_id
+            WHERE u.username = $1
+            """,
+            username
+        )
+
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        if not profile["is_public_profile"]:
+            raise HTTPException(status_code=403, detail="This profile is private")
+
+        # Get stats
+        stats = {
+            "easy": 0,
+            "medium": 0,
+            "advanced": 0,
+            "total_solved": 0
+        }
+        
+        rows = await conn.fetch(
+            """
+            SELECT p.difficulty, COUNT(DISTINCT us.problem_id) as solved
+            FROM core.user_solutions us
+            JOIN core.problems p ON us.problem_id = p.id
+            WHERE us.user_id = $1
+            GROUP BY p.difficulty
+            """,
+            profile["user_id"]
+        )
+
+        for r in rows:
+            diff = r["difficulty"].lower()
+            if diff in stats:
+                stats[diff] = r["solved"]
+                stats["total_solved"] += r["solved"]
+
+    return {
+        "username": username,
+        "full_name": profile["full_name"],
+        "avatar_url": profile["avatar_url"],
+        "job_role": profile["job_role"],
+        "occupation": profile["occupation"],
+        "bio": profile["bio"],
+        "linkedin_url": profile["linkedin_url"],
+        "github_url": profile["github_url"],
+        "current_streak": profile["current_streak"],
+        "joined_at": profile["created_at"],
+        "stats": stats
+    }
+
 @router.post("/me/profile")
 async def update_my_profile(data: ProfileUpdate, user=Depends(verify_jwt)):
+    import re
+    import asyncpg
     pool = await get_pool()
     user_id = user["user_id"]
     email = user.get("email")
 
     if not email:
         raise HTTPException(status_code=400, detail="Email required from token")
+        
+    # Validation
+    if data.username:
+        if not re.match(r"^[a-zA-Z0-9-]+$", data.username):
+            raise HTTPException(status_code=422, detail="Username can only contain alphanumeric characters and hyphens")
+        if len(data.username) > 30:
+            raise HTTPException(status_code=422, detail="Username is too long")
+            
+    if data.linkedin_url and not data.linkedin_url.startswith("https://www.linkedin.com/"):
+        raise HTTPException(status_code=422, detail="Invalid LinkedIn URL")
+    if data.github_url and not data.github_url.startswith("https://github.com/"):
+        raise HTTPException(status_code=422, detail="Invalid GitHub URL")
 
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO core.users (user_id, email, full_name, occupation, job_role, experience_years, avatar_url, onboarding_completed)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, true)
-            ON CONFLICT (user_id) DO UPDATE SET
-                full_name = COALESCE(EXCLUDED.full_name, core.users.full_name),
-                occupation = COALESCE(EXCLUDED.occupation, core.users.occupation),
-                job_role = COALESCE(EXCLUDED.job_role, core.users.job_role),
-                experience_years = COALESCE(EXCLUDED.experience_years, core.users.experience_years),
-                avatar_url = COALESCE(EXCLUDED.avatar_url, core.users.avatar_url),
-                onboarding_completed = true
-            """,
-            user_id,
-            email,
-            data.full_name,
-            data.occupation,
-            data.job_role,
-            data.experience_years,
-            data.avatar_url
-        )
+        try:
+            await conn.execute(
+                """
+                INSERT INTO core.users (user_id, email, full_name, occupation, job_role, experience_years, avatar_url, onboarding_completed, username, is_public_profile, bio, linkedin_url, github_url)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    full_name = COALESCE(EXCLUDED.full_name, core.users.full_name),
+                    occupation = COALESCE(EXCLUDED.occupation, core.users.occupation),
+                    job_role = COALESCE(EXCLUDED.job_role, core.users.job_role),
+                    experience_years = COALESCE(EXCLUDED.experience_years, core.users.experience_years),
+                    avatar_url = COALESCE(EXCLUDED.avatar_url, core.users.avatar_url),
+                    username = COALESCE(EXCLUDED.username, core.users.username),
+                    is_public_profile = COALESCE(EXCLUDED.is_public_profile, core.users.is_public_profile),
+                    bio = COALESCE(EXCLUDED.bio, core.users.bio),
+                    linkedin_url = COALESCE(EXCLUDED.linkedin_url, core.users.linkedin_url),
+                    github_url = COALESCE(EXCLUDED.github_url, core.users.github_url),
+                    profile_updated_at = NOW(),
+                    onboarding_completed = true
+                """,
+                user_id,
+                email,
+                data.full_name,
+                data.occupation,
+                data.job_role,
+                data.experience_years,
+                data.avatar_url,
+                data.username,
+                data.is_public_profile,
+                data.bio,
+                data.linkedin_url,
+                data.github_url
+            )
+        except asyncpg.exceptions.UniqueViolationError as e:
+            if "username" in str(e):
+                raise HTTPException(status_code=409, detail="Username is already taken")
+            raise HTTPException(status_code=400, detail="Unique constraint violation")
 
     return {"status": "success"}
 
@@ -424,6 +522,8 @@ async def get_leaderboard():
             """
             SELECT
                 u.user_id,
+                u.username,
+                u.is_public_profile,
                 u.full_name,
                 u.avatar_url,
                 u.job_role,
@@ -433,23 +533,25 @@ async def get_leaderboard():
             FROM core.user_solutions us
             JOIN core.users u ON us.user_id = u.user_id
             LEFT JOIN core.streaks s ON u.user_id = s.user_id
-            GROUP BY u.user_id, u.full_name, u.avatar_url, u.job_role, u.occupation, s.current_streak
+            GROUP BY u.user_id, u.username, u.is_public_profile, u.full_name, u.avatar_url, u.job_role, u.occupation, s.current_streak
             ORDER BY total_solved DESC, current_streak DESC
             LIMIT 20
             """
         )
 
-    return [
-        {
-            "user_id": str(r["user_id"]),
-            "full_name": r["full_name"] or "Anonymous",
-            "avatar_url": r["avatar_url"],
-            "job_role": r["job_role"] or r["occupation"] or "Member",
+    result = []
+    for r in rows:
+        is_public = r["is_public_profile"]
+        result.append({
+            "user_id": str(r["user_id"]) if is_public else None,
+            "username": r["username"] if is_public else None,
+            "full_name": r["full_name"] if is_public and r["full_name"] else "Anonymous User",
+            "avatar_url": r["avatar_url"] if is_public else None,
+            "job_role": (r["job_role"] or r["occupation"] or "Member") if is_public else "Member",
             "total_solved": r["total_solved"],
             "current_streak": r["current_streak"],
-        }
-        for r in rows
-    ]
+        })
+    return result
 
 
 @router.get("/me/solved-ids")

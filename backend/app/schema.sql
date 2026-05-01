@@ -65,6 +65,12 @@ CREATE TABLE IF NOT EXISTS core.users (
     experience_years INTEGER,
     avatar_url TEXT,
     onboarding_completed BOOLEAN DEFAULT FALSE,
+    username TEXT UNIQUE,
+    is_public_profile BOOLEAN DEFAULT TRUE,
+    bio TEXT,
+    linkedin_url TEXT,
+    github_url TEXT,
+    profile_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
