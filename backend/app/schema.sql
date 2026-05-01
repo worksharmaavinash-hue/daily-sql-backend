@@ -41,9 +41,7 @@ CREATE TABLE IF NOT EXISTS core.attempts (
     attempt_date DATE NOT NULL,
     status TEXT CHECK (status IN ('correct', 'incorrect', 'error')) NOT NULL,
     execution_time_ms INT,
-    created_at TIMESTAMP DEFAULT now(),
-
-    UNIQUE (user_id, problem_id, attempt_date)
+    created_at TIMESTAMP DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS core.streaks (
@@ -137,3 +135,12 @@ CREATE TABLE IF NOT EXISTS core.waitlist (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+
+-- Likes/Dislikes for comments
+CREATE TABLE IF NOT EXISTS core.comment_votes (
+    user_id    UUID NOT NULL REFERENCES core.users(user_id) ON DELETE CASCADE,
+    comment_id UUID NOT NULL REFERENCES core.comments(id) ON DELETE CASCADE,
+    vote_type  SMALLINT NOT NULL CHECK (vote_type IN (1, -1)), -- 1 for like, -1 for dislike
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (user_id, comment_id)
+);

@@ -12,6 +12,10 @@ class CommentCreate(BaseModel):
     parent_id: Optional[str] = None
 
 
+class CommentVote(BaseModel):
+    vote_type: int = Field(..., description="1 for like, -1 for dislike")
+
+
 @router.get("/problems/{problem_id}/comments")
 async def get_comments(
     problem_id: str,
@@ -39,14 +43,18 @@ async def get_comments(
             """
             SELECT
                 c.id, c.body, c.created_at, c.parent_id, c.user_id,
-                u.full_name, u.email
+                u.full_name, u.email,
+                (SELECT COUNT(*) FROM core.comment_votes WHERE comment_id = c.id AND vote_type = 1) as likes,
+                (SELECT COUNT(*) FROM core.comment_votes WHERE comment_id = c.id AND vote_type = -1) as dislikes,
+                (SELECT vote_type FROM core.comment_votes WHERE comment_id = c.id AND user_id = $4) as user_vote
             FROM core.comments c
             JOIN core.users u ON c.user_id = u.user_id
             WHERE c.problem_id = $1 AND c.parent_id IS NULL
             ORDER BY c.created_at ASC
             LIMIT $2 OFFSET $3
             """,
-            problem_id, limit, offset
+            problem_id, limit, offset,
+            current_user["user_id"] if current_user else None
         )
 
         top_ids = [str(r["id"]) for r in top_rows]
@@ -59,13 +67,17 @@ async def get_comments(
                 f"""
                 SELECT
                     c.id, c.body, c.created_at, c.parent_id, c.user_id,
-                    u.full_name, u.email
+                    u.full_name, u.email,
+                    (SELECT COUNT(*) FROM core.comment_votes WHERE comment_id = c.id AND vote_type = 1) as likes,
+                    (SELECT COUNT(*) FROM core.comment_votes WHERE comment_id = c.id AND vote_type = -1) as dislikes,
+                    (SELECT vote_type FROM core.comment_votes WHERE comment_id = c.id AND user_id = ${len(top_ids) + 1}) as user_vote
                 FROM core.comments c
                 JOIN core.users u ON c.user_id = u.user_id
                 WHERE c.parent_id::text IN ({placeholders})
                 ORDER BY c.created_at ASC
                 """,
-                *top_ids
+                *top_ids,
+                current_user["user_id"] if current_user else None
             )
             for r in reply_rows:
                 pid = str(r["parent_id"])
@@ -81,6 +93,9 @@ async def get_comments(
                         "initials": ((r["full_name"] or r["email"])[:2]).upper(),
                     },
                     "is_own": current_user is not None and str(r["user_id"]) == str(current_user["user_id"]),
+                    "likes": r["likes"],
+                    "dislikes": r["dislikes"],
+                    "user_vote": r["user_vote"]
                 })
 
         results = []
@@ -99,6 +114,9 @@ async def get_comments(
                 "reply_count": len(replies),
                 "replies": replies,
                 "is_own": current_user is not None and str(r["user_id"]) == str(current_user["user_id"]),
+                "likes": r["likes"],
+                "dislikes": r["dislikes"],
+                "user_vote": r["user_vote"]
             })
 
     return results
@@ -175,3 +193,54 @@ async def delete_comment(
             raise HTTPException(status_code=403, detail="Cannot delete another user's comment")
 
         await conn.execute("DELETE FROM core.comments WHERE id = $1", comment_id)
+
+
+@router.post("/comments/{comment_id}/vote")
+async def toggle_vote(
+    comment_id: str,
+    payload: CommentVote,
+    current_user: dict = Depends(verify_jwt),
+):
+    """
+    Toggle a like/dislike on a comment.
+    - If same vote exists: DELETE (toggle off)
+    - If different vote exists: UPDATE
+    - If no vote: INSERT
+    """
+    if payload.vote_type not in (1, -1):
+        raise HTTPException(status_code=400, detail="Invalid vote type")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Check if comment exists
+        exists = await conn.fetchval("SELECT 1 FROM core.comments WHERE id = $1", comment_id)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Comment not found")
+
+        # Check existing vote
+        existing_vote = await conn.fetchval(
+            "SELECT vote_type FROM core.comment_votes WHERE comment_id = $1 AND user_id = $2",
+            comment_id, current_user["user_id"]
+        )
+
+        if existing_vote == payload.vote_type:
+            # Toggle off
+            await conn.execute(
+                "DELETE FROM core.comment_votes WHERE comment_id = $1 AND user_id = $2",
+                comment_id, current_user["user_id"]
+            )
+            return {"status": "removed"}
+        elif existing_vote is not None:
+            # Update vote type
+            await conn.execute(
+                "UPDATE core.comment_votes SET vote_type = $1 WHERE comment_id = $2 AND user_id = $3",
+                payload.vote_type, comment_id, current_user["user_id"]
+            )
+            return {"status": "updated", "vote_type": payload.vote_type}
+        else:
+            # New vote
+            await conn.execute(
+                "INSERT INTO core.comment_votes (comment_id, user_id, vote_type) VALUES ($1, $2, $3)",
+                comment_id, current_user["user_id"], payload.vote_type
+            )
+            return {"status": "added", "vote_type": payload.vote_type}

@@ -18,6 +18,7 @@ import os
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID as PyUUID
+from app.admin.analytics_router import router as analytics_router
 
 
 def json_serial(obj):
@@ -53,6 +54,7 @@ async def get_admin_api_key(request: Request, api_key: str = Security(api_key_he
     raise HTTPException(status_code=403, detail="Admin access required")
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_admin_api_key)])
+router.include_router(analytics_router)
 
 
 # ============ GET ENDPOINTS (For Admin UI) ============
