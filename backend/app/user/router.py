@@ -296,14 +296,32 @@ async def get_public_profile(username: str):
         if not profile["is_public_profile"]:
             raise HTTPException(status_code=403, detail="This profile is private")
 
-        # Get stats
+        # Get total problem counts by difficulty
+        totals = await conn.fetch(
+            """
+            SELECT difficulty, COUNT(*) as total
+            FROM core.problems
+            WHERE is_active = true OR EXISTS (
+                SELECT 1 FROM core.daily_practice 
+                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+            )
+            GROUP BY difficulty
+            """
+        )
+
         stats = {
-            "easy": 0,
-            "medium": 0,
-            "advanced": 0,
+            "easy": {"solved": 0, "total": 0},
+            "medium": {"solved": 0, "total": 0},
+            "advanced": {"solved": 0, "total": 0},
             "total_solved": 0
         }
-        
+
+        for r in totals:
+            diff = r["difficulty"].lower()
+            if diff in stats:
+                stats[diff]["total"] = r["total"]
+
         rows = await conn.fetch(
             """
             SELECT p.difficulty, COUNT(DISTINCT us.problem_id) as solved
@@ -318,8 +336,44 @@ async def get_public_profile(username: str):
         for r in rows:
             diff = r["difficulty"].lower()
             if diff in stats:
-                stats[diff] = r["solved"]
+                stats[diff]["solved"] = r["solved"]
                 stats["total_solved"] += r["solved"]
+
+        # Get recent submissions
+        submissions_rows = await conn.fetch(
+            """
+            SELECT us.problem_id, p.title, p.difficulty, us.created_at
+            FROM core.user_solutions us
+            JOIN core.problems p ON us.problem_id = p.id
+            WHERE us.user_id = $1
+            ORDER BY us.created_at DESC
+            LIMIT 10
+            """,
+            profile["user_id"]
+        )
+        submissions = [
+            {
+                "id": r["problem_id"],
+                "title": r["title"],
+                "difficulty": r["difficulty"].lower(),
+                "created_at": r["created_at"]
+            }
+            for r in submissions_rows
+        ]
+
+        # Get heatmap
+        heatmap_rows = await conn.fetch(
+            """
+            SELECT attempt_date, COUNT(*) as count
+            FROM core.attempts
+            WHERE user_id = $1 AND status = 'correct'
+            GROUP BY attempt_date
+            ORDER BY attempt_date DESC
+            LIMIT 365
+            """,
+            profile["user_id"]
+        )
+        heatmap = {str(r["attempt_date"]): r["count"] for r in heatmap_rows}
 
     return {
         "username": username,
@@ -332,7 +386,9 @@ async def get_public_profile(username: str):
         "github_url": profile["github_url"],
         "current_streak": profile["current_streak"],
         "joined_at": profile["created_at"],
-        "stats": stats
+        "stats": stats,
+        "submissions": submissions,
+        "heatmap": heatmap
     }
 
 @router.post("/me/profile")
@@ -407,6 +463,32 @@ async def get_my_solution(problem_id: str, user=Depends(verify_jwt)):
         row = await conn.fetchrow(
             "SELECT submitted_query FROM core.user_solutions WHERE user_id = $1 AND problem_id = $2",
             user_id,
+            problem_id
+        )
+
+    if not row:
+        return {"submitted_query": None}
+
+    return {"submitted_query": row["submitted_query"]}
+
+@router.get("/u/{username}/solutions/{problem_id}")
+async def get_public_solution(username: str, problem_id: str):
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        # Check if profile is public
+        profile = await conn.fetchrow(
+            "SELECT user_id, is_public_profile FROM core.users WHERE username = $1",
+            username
+        )
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        if not profile["is_public_profile"]:
+            raise HTTPException(status_code=403, detail="This profile is private")
+
+        row = await conn.fetchrow(
+            "SELECT submitted_query FROM core.user_solutions WHERE user_id = $1 AND problem_id = $2",
+            profile["user_id"],
             problem_id
         )
 
