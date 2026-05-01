@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS core.waitlist (
     job_role TEXT,
     experience_years INTEGER,
     source TEXT,
+    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 

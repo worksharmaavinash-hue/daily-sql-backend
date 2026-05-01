@@ -573,9 +573,11 @@ async def bulk_add_to_whitelist(payload: WhitelistBulkCreate):
     return {"status": "bulk_added", "count": len(emails)}
 
 
+# ============ ADMIN WAITLIST MANAGEMENT ============
+
 @router.get("/waitlist")
 async def list_waitlist():
-    """List all users on the waitlist."""
+    """List all waitlist entries."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -591,15 +593,59 @@ async def list_waitlist():
             "job_role": r["job_role"],
             "experience_years": r["experience_years"],
             "source": r["source"],
+            "status": r["status"],
             "created_at": r["created_at"].isoformat()
         }
         for r in rows
     ]
 
 
-@router.delete("/waitlist/{waitlist_id}")
-async def remove_from_waitlist(waitlist_id: str):
-    """Remove an entry from the waitlist."""
+@router.post("/waitlist/{waitlist_id}/approve")
+async def approve_waitlist_entry(waitlist_id: str):
+    """Approve a waitlist entry and move the email to the whitelist."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Get the email
+            email = await conn.fetchval(
+                "SELECT email FROM core.waitlist WHERE id = $1",
+                waitlist_id
+            )
+            if not email:
+                raise HTTPException(status_code=404, detail="Waitlist entry not found")
+            
+            # Add to whitelist
+            await conn.execute(
+                "INSERT INTO core.whitelist (email) VALUES ($1) ON CONFLICT DO NOTHING",
+                email
+            )
+            
+            # Update status
+            await conn.execute(
+                "UPDATE core.waitlist SET status = 'approved' WHERE id = $1",
+                waitlist_id
+            )
+            
+    return {"status": "approved", "email": email}
+
+
+@router.post("/waitlist/{waitlist_id}/reject")
+async def reject_waitlist_entry(waitlist_id: str):
+    """Reject a waitlist entry."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE core.waitlist SET status = 'rejected' WHERE id = $1",
+            waitlist_id
+        )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Waitlist entry not found")
+    return {"status": "rejected"}
+
+
+@router.delete("/waitlist/{waitlist_id}", status_code=200)
+async def delete_waitlist_entry(waitlist_id: str):
+    """Permanently delete a waitlist entry."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute(
@@ -607,5 +653,6 @@ async def remove_from_waitlist(waitlist_id: str):
             waitlist_id
         )
     if result == "DELETE 0":
-        raise HTTPException(status_code=404, detail="Entry not found")
-    return {"status": "removed"}
+        raise HTTPException(status_code=404, detail="Waitlist entry not found")
+    return {"status": "deleted"}
+
