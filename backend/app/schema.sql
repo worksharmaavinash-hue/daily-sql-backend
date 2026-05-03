@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS core.users (
     occupation TEXT,
     job_role TEXT,
     experience_years INTEGER,
+    whatsapp_number TEXT,
+    source TEXT,
     avatar_url TEXT,
     onboarding_completed BOOLEAN DEFAULT FALSE,
     username TEXT UNIQUE,

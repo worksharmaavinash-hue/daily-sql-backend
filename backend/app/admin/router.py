@@ -658,3 +658,39 @@ async def delete_waitlist_entry(waitlist_id: str):
         raise HTTPException(status_code=404, detail="Waitlist entry not found")
     return {"status": "deleted"}
 
+
+@router.get("/users")
+async def list_users():
+    """List all registered users with detailed activity metrics for admin view"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                u.user_id, u.email, u.full_name, u.whatsapp_number, u.source, 
+                u.occupation, u.job_role, u.experience_years, u.created_at, u.onboarding_completed,
+                MAX(a.created_at) as last_active_at,
+                COUNT(DISTINCT CASE WHEN a.status = 'correct' THEN a.problem_id END) as total_solved
+            FROM core.users u
+            LEFT JOIN core.attempts a ON u.user_id = a.user_id
+            GROUP BY u.user_id
+            ORDER BY u.created_at DESC
+            """
+        )
+    return [
+        {
+            "user_id": str(r["user_id"]),
+            "email": r["email"],
+            "full_name": r["full_name"],
+            "whatsapp_number": r["whatsapp_number"],
+            "source": r["source"],
+            "occupation": r["occupation"],
+            "job_role": r["job_role"],
+            "experience_years": r["experience_years"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "onboarding_completed": r["onboarding_completed"],
+            "last_active_at": r["last_active_at"].isoformat() if r["last_active_at"] else None,
+            "total_solved": r["total_solved"]
+        }
+        for r in rows
+    ]

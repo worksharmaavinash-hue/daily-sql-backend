@@ -30,6 +30,9 @@ async def init_db():
                 ALTER TABLE core.users ADD COLUMN IF NOT EXISTS linkedin_url TEXT;
                 ALTER TABLE core.users ADD COLUMN IF NOT EXISTS github_url TEXT;
                 ALTER TABLE core.users ADD COLUMN IF NOT EXISTS profile_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
+                ALTER TABLE core.users ADD COLUMN IF NOT EXISTS whatsapp_number TEXT;
+                ALTER TABLE core.users ADD COLUMN IF NOT EXISTS source TEXT;
+                ALTER TABLE core.users ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN DEFAULT FALSE;
                 ALTER TABLE core.problem_datasets ADD COLUMN IF NOT EXISTS column_types JSONB NOT NULL DEFAULT '{}'::jsonb;
                 CREATE TABLE IF NOT EXISTS core.whitelist (
                     email TEXT PRIMARY KEY,

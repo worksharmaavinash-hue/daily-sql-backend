@@ -18,8 +18,9 @@ async def get_analytics_summary():
         # New Signups (Last 7 days)
         signups_7d = await conn.fetch("SELECT created_at::date as date, COUNT(*) as count FROM core.users WHERE created_at > CURRENT_DATE - INTERVAL '7 days' GROUP BY 1 ORDER BY 1")
         
-        # Total Users
+        # Total Users & Onboarding Rate
         total_users = await conn.fetchval("SELECT COUNT(*) FROM core.users")
+        onboarded_users = await conn.fetchval("SELECT COUNT(*) FROM core.users WHERE onboarding_completed = true")
         total_waitlist = await conn.fetchval("SELECT COUNT(*) FROM core.waitlist")
 
         return {
@@ -27,6 +28,8 @@ async def get_analytics_summary():
             "wau": wau or 0,
             "mau": mau or 0,
             "total_users": total_users or 0,
+            "onboarded_users": onboarded_users or 0,
+            "onboarding_rate": round((onboarded_users / total_users * 100) if total_users else 0, 1),
             "total_waitlist": total_waitlist or 0,
             "signups_trend": [{"date": r["date"], "count": r["count"]} for r in signups_7d]
         }
@@ -119,23 +122,20 @@ async def get_demographics():
         roles = await conn.fetch("""
             SELECT 
                 CASE 
-                    WHEN job_role ILIKE '%backend%' THEN 'Backend Engineering'
-                    WHEN job_role ILIKE '%frontend%' THEN 'Frontend Engineering'
-                    WHEN job_role ILIKE '%fullstack%' OR job_role ILIKE '%full%stack%' THEN 'Fullstack Engineering'
-                    WHEN job_role ILIKE '%data%scientist%' OR job_role ILIKE '%data%science%' THEN 'Data Science'
-                    WHEN job_role ILIKE '%data%engineer%' THEN 'Data Engineering'
-                    WHEN job_role ILIKE '%analyst%' OR job_role ILIKE '%analytics%' THEN 'Data Analytics'
-                    WHEN job_role ILIKE '%product%' THEN 'Product Management'
-                    WHEN job_role ILIKE '%student%' THEN 'Education/Student'
-                    WHEN job_role ILIKE '%manager%' OR job_role ILIKE '%lead%' THEN 'Management/Leadership'
-                    ELSE INITCAP(job_role)
+                    WHEN COALESCE(job_role, occupation) ILIKE '%backend%' THEN 'Backend Engineering'
+                    WHEN COALESCE(job_role, occupation) ILIKE '%frontend%' THEN 'Frontend Engineering'
+                    WHEN COALESCE(job_role, occupation) ILIKE '%fullstack%' OR COALESCE(job_role, occupation) ILIKE '%full%stack%' THEN 'Fullstack Engineering'
+                    WHEN COALESCE(job_role, occupation) ILIKE '%data%scientist%' OR COALESCE(job_role, occupation) ILIKE '%data%science%' THEN 'Data Science'
+                    WHEN COALESCE(job_role, occupation) ILIKE '%data%engineer%' THEN 'Data Engineering'
+                    WHEN COALESCE(job_role, occupation) ILIKE '%analyst%' OR COALESCE(job_role, occupation) ILIKE '%analytics%' THEN 'Data Analytics'
+                    WHEN COALESCE(job_role, occupation) ILIKE '%product%' THEN 'Product Management'
+                    WHEN COALESCE(job_role, occupation) ILIKE '%student%' THEN 'Education/Student'
+                    WHEN COALESCE(job_role, occupation) ILIKE '%manager%' OR COALESCE(job_role, occupation) ILIKE '%lead%' THEN 'Management/Leadership'
+                    ELSE INITCAP(COALESCE(job_role, occupation, 'Other'))
                 END as normalized_role,
                 COUNT(*) as count
-            FROM (
-                SELECT job_role FROM core.waitlist WHERE job_role IS NOT NULL
-                UNION ALL
-                SELECT job_role FROM core.users WHERE job_role IS NOT NULL
-            ) combined
+            FROM core.users
+            WHERE job_role IS NOT NULL OR occupation IS NOT NULL
             GROUP BY 1 ORDER BY 2 DESC LIMIT 15
         """)
         
@@ -150,11 +150,8 @@ async def get_demographics():
                 END as range,
                 COUNT(*) as count,
                 MIN(experience_years) as sort_order
-            FROM (
-                SELECT experience_years FROM core.waitlist WHERE experience_years IS NOT NULL
-                UNION ALL
-                SELECT experience_years FROM core.users WHERE experience_years IS NOT NULL
-            ) combined
+            FROM core.users
+            WHERE experience_years IS NOT NULL
             GROUP BY 1 ORDER BY sort_order
         """)
 

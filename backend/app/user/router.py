@@ -7,6 +7,8 @@ from app.auth.jwt import verify_jwt
 from pydantic import BaseModel
 from typing import Optional, List
 import time
+import random
+import string
 from app.user.cloudinary_utils import generate_cloudinary_signature
 from datetime import datetime, timedelta
 try:
@@ -248,6 +250,8 @@ class ProfileUpdate(BaseModel):
     bio: Optional[str] = None
     linkedin_url: Optional[str] = None
     github_url: Optional[str] = None
+    whatsapp_number: Optional[str] = None
+    source: Optional[str] = None
 
 @router.get("/me/profile")
 async def get_my_profile(user=Depends(verify_jwt)):
@@ -399,6 +403,27 @@ async def update_my_profile(data: ProfileUpdate, user=Depends(verify_jwt)):
     user_id = user["user_id"]
     email = user.get("email")
 
+    async def generate_unique_username(conn, email_hint: str):
+        # Base username from email prefix
+        base = email_hint.split('@')[0].lower()
+        base = re.sub(r'[^a-z0-9]', '', base)
+        if not base:
+            base = "user"
+        
+        # Try base first
+        existing = await conn.fetchval("SELECT 1 FROM core.users WHERE username = $1", base)
+        if not existing:
+            return base
+            
+        # Try with random suffix
+        for _ in range(10):
+            suffix = ''.join(random.choices(string.digits, k=4))
+            candidate = f"{base}-{suffix}"
+            existing = await conn.fetchval("SELECT 1 FROM core.users WHERE username = $1", candidate)
+            if not existing:
+                return candidate
+        return f"{base}-{random.randint(10000, 99999)}"
+
     if not email:
         raise HTTPException(status_code=400, detail="Email required from token")
         
@@ -415,11 +440,18 @@ async def update_my_profile(data: ProfileUpdate, user=Depends(verify_jwt)):
         raise HTTPException(status_code=422, detail="Invalid GitHub URL")
 
     async with pool.acquire() as conn:
+        # If username is not provided and user doesn't have one, generate it
+        current_username = await conn.fetchval("SELECT username FROM core.users WHERE user_id = $1", user_id)
+        
+        target_username = data.username
+        if not target_username and not current_username:
+            target_username = await generate_unique_username(conn, email)
+
         try:
             await conn.execute(
                 """
-                INSERT INTO core.users (user_id, email, full_name, occupation, job_role, experience_years, avatar_url, onboarding_completed, username, is_public_profile, bio, linkedin_url, github_url)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12)
+                INSERT INTO core.users (user_id, email, full_name, occupation, job_role, experience_years, avatar_url, onboarding_completed, username, is_public_profile, bio, linkedin_url, github_url, whatsapp_number, source)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12, $13, $14)
                 ON CONFLICT (user_id) DO UPDATE SET
                     full_name = COALESCE(EXCLUDED.full_name, core.users.full_name),
                     occupation = COALESCE(EXCLUDED.occupation, core.users.occupation),
@@ -431,6 +463,8 @@ async def update_my_profile(data: ProfileUpdate, user=Depends(verify_jwt)):
                     bio = COALESCE(EXCLUDED.bio, core.users.bio),
                     linkedin_url = COALESCE(EXCLUDED.linkedin_url, core.users.linkedin_url),
                     github_url = COALESCE(EXCLUDED.github_url, core.users.github_url),
+                    whatsapp_number = COALESCE(EXCLUDED.whatsapp_number, core.users.whatsapp_number),
+                    source = COALESCE(EXCLUDED.source, core.users.source),
                     profile_updated_at = NOW(),
                     onboarding_completed = true
                 """,
@@ -441,11 +475,13 @@ async def update_my_profile(data: ProfileUpdate, user=Depends(verify_jwt)):
                 data.job_role,
                 data.experience_years,
                 data.avatar_url,
-                data.username,
+                target_username,
                 data.is_public_profile,
                 data.bio,
                 data.linkedin_url,
-                data.github_url
+                data.github_url,
+                data.whatsapp_number,
+                data.source
             )
         except asyncpg.exceptions.UniqueViolationError as e:
             if "username" in str(e):

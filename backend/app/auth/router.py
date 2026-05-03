@@ -96,11 +96,6 @@ async def register(data: RegisterRequest):
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Check Whitelist
-        whitelisted = await conn.fetchval("SELECT 1 FROM core.whitelist WHERE email = $1", data.email)
-        if not whitelisted:
-            raise HTTPException(status_code=403, detail="Your email is not authorized for early access.")
-
         existing = await conn.fetchrow("SELECT user_id FROM core.users WHERE email = $1", data.email)
         if existing:
             raise HTTPException(status_code=409, detail="An account with this email already exists.")
@@ -169,11 +164,6 @@ async def login(data: LoginRequest):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        # Check Whitelist
-        whitelisted = await conn.fetchval("SELECT 1 FROM core.whitelist WHERE email = $1", data.email)
-        if not whitelisted:
-            raise HTTPException(status_code=403, detail="Your email is not authorized for access.")
-
         row = await conn.fetchrow(
             "SELECT user_id, hashed_password FROM core.users WHERE email = $1 AND auth_provider = 'email'",
             data.email,
@@ -266,11 +256,6 @@ async def google_callback(code: Optional[str] = None, state: Optional[str] = Non
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        # Check Whitelist
-        whitelisted = await conn.fetchval("SELECT 1 FROM core.whitelist WHERE email = $1", email)
-        if not whitelisted:
-            return RedirectResponse(f"{FRONTEND_URL}/login?error=not_authorized")
-
         # Check if a user with this email already exists (any provider)
         existing = await conn.fetchrow(
             "SELECT user_id FROM core.users WHERE email = $1",
