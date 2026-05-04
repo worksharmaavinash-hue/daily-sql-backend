@@ -297,8 +297,10 @@ async def get_public_profile(username: str):
         if not profile:
             raise HTTPException(status_code=404, detail="Profile not found")
 
-        if not profile["is_public_profile"]:
-            raise HTTPException(status_code=403, detail="This profile is private")
+        # Privacy check removed as per new community guidelines
+        # if not profile["is_public_profile"]:
+        #     raise HTTPException(status_code=403, detail="This profile is private")
+
 
         # Get total problem counts by difficulty
         totals = await conn.fetch(
@@ -476,7 +478,8 @@ async def update_my_profile(data: ProfileUpdate, user=Depends(verify_jwt)):
                 data.experience_years,
                 data.avatar_url,
                 target_username,
-                data.is_public_profile,
+                True, # is_public_profile forced to True
+
                 data.bio,
                 data.linkedin_url,
                 data.github_url,
@@ -519,8 +522,10 @@ async def get_public_solution(username: str, problem_id: str):
         )
         if not profile:
             raise HTTPException(status_code=404, detail="Profile not found")
-        if not profile["is_public_profile"]:
-            raise HTTPException(status_code=403, detail="This profile is private")
+        # Privacy check removed
+        # if not profile["is_public_profile"]:
+        #     raise HTTPException(status_code=403, detail="This profile is private")
+
 
         row = await conn.fetchrow(
             "SELECT submitted_query FROM core.user_solutions WHERE user_id = $1 AND problem_id = $2",
@@ -659,17 +664,17 @@ async def get_leaderboard():
 
     result = []
     for r in rows:
-        is_public = r["is_public_profile"]
         result.append({
-            "user_id": str(r["user_id"]) if is_public else None,
-            "username": r["username"] if is_public else None,
-            "full_name": r["full_name"] if is_public and r["full_name"] else "Anonymous User",
-            "avatar_url": r["avatar_url"] if is_public else None,
-            "job_role": (r["job_role"] or r["occupation"] or "Member") if is_public else "Member",
+            "user_id": str(r["user_id"]),
+            "username": r["username"],
+            "full_name": r["full_name"] if r["full_name"] else "Anonymous User",
+            "avatar_url": r["avatar_url"],
+            "job_role": (r["job_role"] or r["occupation"] or "Member"),
             "total_solved": r["total_solved"],
             "current_streak": r["current_streak"],
         })
     return result
+
 
 
 @router.get("/me/solved-ids")

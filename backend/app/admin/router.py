@@ -694,3 +694,61 @@ async def list_users():
         }
         for r in rows
     ]
+
+
+# ============ WA GROUP CHECKLIST ============
+
+@router.get("/wa-group")
+async def list_wa_group_checklist():
+    """List users with their WhatsApp group status"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                u.user_id, u.email, u.full_name, u.whatsapp_number, u.created_at,
+                CASE WHEN wgm.user_id IS NOT NULL THEN true ELSE false END as is_added,
+                wgm.added_at
+            FROM core.users u
+            LEFT JOIN core.wa_group_members wgm ON u.user_id = wgm.user_id
+            WHERE u.whatsapp_number IS NOT NULL
+            ORDER BY u.created_at DESC
+            """
+        )
+    return [
+        {
+            "user_id": str(r["user_id"]),
+            "email": r["email"],
+            "full_name": r["full_name"],
+            "whatsapp_number": r["whatsapp_number"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "is_added": r["is_added"],
+            "added_at": r["added_at"].isoformat() if r["added_at"] else None
+        }
+        for r in rows
+    ]
+
+
+@router.post("/wa-group/{user_id}")
+async def add_to_wa_group(user_id: str):
+    """Mark a user as added to the WhatsApp group"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO core.wa_group_members (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+            PyUUID(user_id)
+        )
+    return {"status": "added"}
+
+
+@router.delete("/wa-group/{user_id}")
+async def remove_from_wa_group(user_id: str):
+    """Remove a user from the WhatsApp group tracking list"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM core.wa_group_members WHERE user_id = $1",
+            PyUUID(user_id)
+        )
+    return {"status": "removed"}
+

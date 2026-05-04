@@ -146,3 +146,10 @@ CREATE TABLE IF NOT EXISTS core.comment_votes (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     PRIMARY KEY (user_id, comment_id)
 );
+
+-- Tracking for WhatsApp group membership
+CREATE TABLE IF NOT EXISTS core.wa_group_members (
+    user_id   UUID PRIMARY KEY REFERENCES core.users(user_id) ON DELETE CASCADE,
+    added_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+

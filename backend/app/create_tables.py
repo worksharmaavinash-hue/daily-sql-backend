@@ -50,6 +50,13 @@ async def init_db():
                     status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 );
+                -- Create WhatsApp group members tracking table
+                CREATE TABLE IF NOT EXISTS core.wa_group_members (
+                    user_id   UUID PRIMARY KEY REFERENCES core.users(user_id) ON DELETE CASCADE,
+                    added_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+
+
             """)
             print("Migrations applied successfully.")
         except Exception as e:
