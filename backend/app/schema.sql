@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS core.problems (
     description TEXT NOT NULL,
     estimated_time_minutes INTEGER NOT NULL,
     is_active BOOLEAN DEFAULT TRUE,
+    challenge_type TEXT NOT NULL DEFAULT 'sql' CHECK (challenge_type IN ('sql', 'python', 'pyspark')),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -17,12 +18,15 @@ CREATE TABLE IF NOT EXISTS core.problem_datasets (
     schema_sql TEXT NOT NULL,
     seed_sql TEXT NOT NULL,
     sample_rows JSONB NOT NULL,
-    column_types JSONB NOT NULL DEFAULT '{}'::jsonb
+    column_types JSONB NOT NULL DEFAULT '{}'::jsonb,
+    seed_data_json JSONB
 );
 
 CREATE TABLE IF NOT EXISTS core.problem_solutions (
     problem_id UUID REFERENCES core.problems(id),
-    reference_query TEXT NOT NULL,
+    reference_query TEXT,
+    reference_code TEXT,
+    reference_output JSONB,
     order_sensitive BOOLEAN DEFAULT FALSE,
     notes TEXT
 );
@@ -41,6 +45,7 @@ CREATE TABLE IF NOT EXISTS core.attempts (
     attempt_date DATE NOT NULL,
     status TEXT CHECK (status IN ('correct', 'incorrect', 'error')) NOT NULL,
     execution_time_ms INT,
+    challenge_type TEXT DEFAULT 'sql',
     created_at TIMESTAMP DEFAULT now()
 );
 

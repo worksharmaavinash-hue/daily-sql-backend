@@ -25,6 +25,7 @@ services:
       - "8000:8000"
     volumes:
       - ./backend/app:/app/app
+      - /var/run/docker.sock:/var/run/docker.sock
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       - postgres
@@ -35,6 +36,20 @@ services:
     container_name: dailysql-redis
     ports:
       - "6379:6379"
+
+  python-runner-builder:
+    build:
+      context: ./runners/python
+    image: dailysql-python-runner:latest
+    # This service is only to build the image; it exits immediately
+    entrypoint: ["echo", "Python runner image built successfully"]
+
+  pyspark-runner-builder:
+    build:
+      context: ./runners/pyspark
+    image: dailysql-pyspark-runner:latest
+    # This service is only to build the image; it exits immediately
+    entrypoint: ["echo", "PySpark runner image built successfully"]
 
 volumes:
   dailysql_pgdata:

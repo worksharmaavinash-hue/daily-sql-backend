@@ -213,8 +213,8 @@ async def create_problem(payload: ProblemCreate):
         await conn.execute(
             """
             INSERT INTO core.problems
-            (id, title, difficulty, description, estimated_time_minutes, is_active)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            (id, title, difficulty, description, estimated_time_minutes, is_active, challenge_type)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             """,
             problem_id,
             payload.title,
@@ -222,6 +222,7 @@ async def create_problem(payload: ProblemCreate):
             payload.description,
             payload.estimated_time_minutes,
             False,  # New problems start as drafts
+            payload.challenge_type,
         )
 
     return {"problem_id": str(problem_id)}
@@ -232,36 +233,58 @@ async def add_dataset(problem_id: str, payload: DatasetCreate):
     dataset_id = uuid4()
 
     async with pool.acquire() as conn:
-        schema_name = generate_schema_name()
-        
-        try:
-            await conn.execute(f'CREATE SCHEMA "{schema_name}"')
-            await conn.execute(f'SET search_path TO "{schema_name}"')
+        challenge_type = await conn.fetchval(
+            "SELECT challenge_type FROM core.problems WHERE id = $1",
+            problem_id
+        )
+        if not challenge_type:
+            raise HTTPException(status_code=404, detail="Problem not found")
+
+        schema_sql = payload.schema_sql or ""
+        seed_sql = payload.seed_sql or ""
+        seed_data_json_str = None
+
+        if challenge_type == 'sql':
+            # Live Postgres validation for SQL challenges
+            schema_name = generate_schema_name()
+            try:
+                await conn.execute(f'CREATE SCHEMA "{schema_name}"')
+                await conn.execute(f'SET search_path TO "{schema_name}"')
+                
+                # Execute schemas and seed
+                await conn.execute(schema_sql)
+                await conn.execute(seed_sql)
+                
+                # Fetch sample rows
+                records = await conn.fetch(f"SELECT * FROM {payload.table_name} LIMIT 10")
+                sample_rows = [dict(record) for record in records]
+            finally:
+                await teardown_execution_schema(conn, schema_name)
+                await conn.execute('SET search_path TO public')
+        else:
+            # Python/PySpark datasets: Extract sample rows from seed_data_json directly
+            if not payload.seed_data_json:
+                raise HTTPException(status_code=400, detail="seed_data_json is required for python/pyspark challenges")
             
-            # Execute schemas and seed
-            await conn.execute(payload.schema_sql)
-            await conn.execute(payload.seed_sql)
-            
-            # Fetch sample rows
-            records = await conn.fetch(f"SELECT * FROM {payload.table_name} LIMIT 10")
-            sample_rows = [dict(record) for record in records]
-        finally:
-            await teardown_execution_schema(conn, schema_name)
-            await conn.execute('SET search_path TO public')
+            columns = [c["name"] for c in payload.seed_data_json.get("columns", [])]
+            rows = payload.seed_data_json.get("rows", [])[:10]
+            sample_rows = [dict(zip(columns, row)) for row in rows]
+            seed_data_json_str = json.dumps(payload.seed_data_json, default=json_serial)
 
         await conn.execute(
             """
             INSERT INTO core.problem_datasets
-            (id, problem_id, table_name, schema_sql, seed_sql, sample_rows, column_types)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            (id, problem_id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
             dataset_id,
             problem_id,
             payload.table_name,
-            payload.schema_sql,
-            payload.seed_sql,
+            schema_sql,
+            seed_sql,
             json.dumps(sample_rows, default=json_serial),
             json.dumps(payload.column_types),
+            seed_data_json_str
         )
 
     return {"dataset_id": str(dataset_id)}
@@ -271,17 +294,73 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO core.problem_solutions
-            (problem_id, reference_query, order_sensitive, notes)
-            VALUES ($1, $2, $3, $4)
-            """,
-            problem_id,
-            payload.reference_query,
-            payload.order_sensitive,
-            payload.notes,
+        challenge_type = await conn.fetchval(
+            "SELECT challenge_type FROM core.problems WHERE id = $1",
+            problem_id
         )
+        if not challenge_type:
+            raise HTTPException(status_code=404, detail="Problem not found")
+
+        reference_output_json = None
+        if challenge_type != 'sql':
+            if not payload.reference_code:
+                raise HTTPException(status_code=400, detail="reference_code is required for python/pyspark challenges")
+            
+            # Pre-compute and cache the reference output via Docker Engine sandbox
+            datasets = await conn.fetch(
+                "SELECT table_name, seed_data_json FROM core.problem_datasets WHERE problem_id = $1",
+                problem_id
+            )
+            payload_data = {d["table_name"]: d["seed_data_json"] for d in datasets}
+            
+            from app.execution.engines import get_engine
+            engine = get_engine(challenge_type)
+            exec_result = await engine.run(payload.reference_code, problem_id, conn, payload_data)
+            
+            if exec_result.get("error"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Admin Reference Code Failed to Execute: {exec_result['error']}"
+                )
+            
+            reference_output_json = json.dumps({
+                "columns": exec_result["columns"],
+                "rows": exec_result["rows"]
+            }, default=json_serial)
+
+        # Upsert support
+        exists = await conn.fetchval(
+            "SELECT 1 FROM core.problem_solutions WHERE problem_id = $1",
+            problem_id
+        )
+        if exists:
+            await conn.execute(
+                """
+                UPDATE core.problem_solutions
+                SET reference_query = $2, reference_code = $3, reference_output = $4, order_sensitive = $5, notes = $6
+                WHERE problem_id = $1
+                """,
+                problem_id,
+                payload.reference_query,
+                payload.reference_code,
+                reference_output_json,
+                payload.order_sensitive,
+                payload.notes
+            )
+        else:
+            await conn.execute(
+                """
+                INSERT INTO core.problem_solutions
+                (problem_id, reference_query, reference_code, reference_output, order_sensitive, notes)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                problem_id,
+                payload.reference_query,
+                payload.reference_code,
+                reference_output_json,
+                payload.order_sensitive,
+                payload.notes,
+            )
 
     return {"status": "solution_saved"}
 
@@ -404,16 +483,46 @@ async def delete_dataset(problem_id: str, dataset_id: str):
 @router.patch("/problems/{problem_id}/solution")
 async def edit_solution(problem_id: str, payload: dict):
     """Edit the reference solution for a problem."""
-    allowed = {"reference_query", "order_sensitive", "notes"}
+    allowed = {"reference_query", "reference_code", "order_sensitive", "notes"}
     updates = {k: v for k, v in payload.items() if k in allowed}
     if not updates:
         return {"status": "no_changes"}
 
     pool = await get_pool()
-    set_clauses = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(updates))
-    values = list(updates.values())
-
     async with pool.acquire() as conn:
+        challenge_type = await conn.fetchval(
+            "SELECT challenge_type FROM core.problems WHERE id = $1",
+            problem_id
+        )
+        if not challenge_type:
+            raise HTTPException(status_code=404, detail="Problem not found")
+
+        if challenge_type != 'sql' and "reference_code" in updates:
+            # Re-compute and cache the reference output via Docker Engine sandbox
+            datasets = await conn.fetch(
+                "SELECT table_name, seed_data_json FROM core.problem_datasets WHERE problem_id = $1",
+                problem_id
+            )
+            payload_data = {d["table_name"]: d["seed_data_json"] for d in datasets}
+            
+            from app.execution.engines import get_engine
+            engine = get_engine(challenge_type)
+            exec_result = await engine.run(updates["reference_code"], problem_id, conn, payload_data)
+            
+            if exec_result.get("error"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Admin Reference Code Failed to Execute: {exec_result['error']}"
+                )
+            
+            updates["reference_output"] = json.dumps({
+                "columns": exec_result["columns"],
+                "rows": exec_result["rows"]
+            }, default=json_serial)
+
+        set_clauses = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(updates))
+        values = list(updates.values())
+
         result = await conn.execute(
             f"UPDATE core.problem_solutions SET {set_clauses} WHERE problem_id = $1",
             problem_id, *values
