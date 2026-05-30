@@ -1,0 +1,111 @@
+import os
+import json
+import traceback
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from pyspark.sql import SparkSession
+import pandas as pd
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI(title="DailySQL PySpark Runner Service")
+
+class ExecuteRequest(BaseModel):
+    code: str
+    data: dict
+
+# Initialize warm SparkSession globally on startup
+spark = SparkSession.builder \
+    .master("local[1]") \
+    .appName("DailySQLSparkSandbox") \
+    .config("spark.ui.enabled", "false") \
+    .config("spark.driver.host", "127.0.0.1") \
+    .config("spark.driver.bindAddress", "127.0.0.1") \
+    .config("spark.driver.memory", "512m") \
+    .config("spark.sql.shuffle.partitions", "1") \
+    .getOrCreate()
+
+executor = ThreadPoolExecutor(max_workers=2)
+
+def serialize_val(val):
+    if hasattr(val, "isoformat"):
+        return val.isoformat()
+    if hasattr(val, "to_eng_string"):
+        return float(val)
+    return val
+
+def run_code_in_thread(code: str, data_payload: dict):
+    # To prevent side-effects across calls, we clear the temp views
+    # from previous runs first.
+    try:
+        for t in spark.catalog.listTables():
+            if t.isTemporary:
+                spark.catalog.dropTempView(t.name)
+    except Exception:
+        pass
+
+    global_namespace = {"spark": spark}
+    try:
+        # 1. Reconstruct DataFrames & Views
+        for table_name, table_data in data_payload.items():
+            if isinstance(table_data, str):
+                table_data = json.loads(table_data)
+            
+            cols = [c["name"] for c in table_data["columns"]]
+            rows = table_data["rows"]
+            
+            pdf = pd.DataFrame(rows, columns=cols)
+            df = spark.createDataFrame(pdf)
+            
+            global_namespace[f"{table_name}_df"] = df
+            df.createOrReplaceTempView(table_name)
+
+        # 2. Run user code
+        exec(code, global_namespace)
+        
+        if "result" not in global_namespace:
+            return {"error": "Missing 'result' variable. Please assign your final DataFrame to 'result'."}
+            
+        result_df = global_namespace["result"]
+        # Allow either PySpark DataFrame or Pandas DataFrame
+        if hasattr(result_df, "toPandas"):  # PySpark DataFrame
+            pdf_result = result_df.toPandas()
+        elif isinstance(result_df, pd.DataFrame):
+            pdf_result = result_df
+        else:
+            return {"error": "The 'result' variable must be a Spark or Pandas DataFrame."}
+            
+        # 3. Serialize output
+        columns = list(pdf_result.columns)
+        rows = pdf_result.values.tolist()
+        rows = [[serialize_val(cell) for cell in row] for row in rows]
+        
+        return {
+            "columns": columns,
+            "rows": rows,
+            "error": None
+        }
+        
+    except Exception as e:
+        return {
+            "error": f"Runtime Error: {str(e)}\n{traceback.format_exc()}"
+        }
+
+@app.post("/execute")
+async def execute_code(payload: ExecuteRequest):
+    loop = asyncio.get_running_loop()
+    try:
+        # Run in thread executor with a 10 second timeout limit
+        result = await asyncio.wait_for(
+            loop.run_in_executor(executor, run_code_in_thread, payload.code, payload.data),
+            timeout=10.0
+        )
+        return result
+    except asyncio.TimeoutError:
+        return {
+            "error": "Execution Timeout: Code took too long to execute (limit: 10 seconds)."
+        }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5002)
