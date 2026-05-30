@@ -111,11 +111,11 @@ async def get_problem_details(problem_id: str):
             raise HTTPException(status_code=404, detail="Problem not found")
         
         datasets = await conn.fetch(
-            "SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types FROM core.problem_datasets WHERE problem_id = $1",
+            "SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json FROM core.problem_datasets WHERE problem_id = $1",
             problem_id
         )
         solution = await conn.fetchrow(
-            "SELECT reference_query, order_sensitive, notes FROM core.problem_solutions WHERE problem_id = $1",
+            "SELECT reference_query, reference_code, reference_output, order_sensitive, notes FROM core.problem_solutions WHERE problem_id = $1",
             problem_id
         )
     
@@ -126,19 +126,23 @@ async def get_problem_details(problem_id: str):
         "description": problem["description"],
         "estimated_time_minutes": problem["estimated_time_minutes"],
         "is_active": problem["is_active"],
+        "challenge_type": problem.get("challenge_type", "sql"),
         "datasets": [
             {
                 "id": str(d["id"]),
                 "table_name": d["table_name"],
                 "schema_sql": d["schema_sql"],
                 "seed_sql": d["seed_sql"],
-                "sample_rows": d["sample_rows"],
-                "column_types": d["column_types"]
+                "sample_rows": json.loads(d["sample_rows"]) if isinstance(d["sample_rows"], str) else d["sample_rows"],
+                "column_types": json.loads(d["column_types"]) if isinstance(d["column_types"], str) else d["column_types"],
+                "seed_data_json": json.loads(d["seed_data_json"]) if isinstance(d["seed_data_json"], str) else d["seed_data_json"],
             }
             for d in datasets
         ],
         "solution": {
             "reference_query": solution["reference_query"],
+            "reference_code": solution["reference_code"],
+            "reference_output": json.loads(solution["reference_output"]) if isinstance(solution["reference_output"], str) else solution["reference_output"],
             "order_sensitive": solution["order_sensitive"],
             "notes": solution["notes"]
         } if solution else None

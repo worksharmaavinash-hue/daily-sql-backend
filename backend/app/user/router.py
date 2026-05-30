@@ -96,7 +96,7 @@ async def get_problem(problem_id: str):
     async with pool.acquire() as conn:
         problem = await conn.fetchrow(
             """
-            SELECT id, title, difficulty, description, estimated_time_minutes
+            SELECT id, title, difficulty, description, estimated_time_minutes, challenge_type
             FROM core.problems
             WHERE id = $1 AND (is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
@@ -118,7 +118,7 @@ async def list_problems():
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, title, difficulty, description, estimated_time_minutes
+            SELECT id, title, difficulty, description, estimated_time_minutes, challenge_type
             FROM core.problems
             WHERE is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
@@ -137,7 +137,7 @@ async def get_problem_datasets(problem_id: str):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types
+            SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json
             FROM core.problem_datasets
             WHERE problem_id = $1
             """,
@@ -155,40 +155,65 @@ async def get_problem_datasets(problem_id: str):
             "seed_sql": r["seed_sql"],
             "sample_rows": json.loads(r["sample_rows"]) if isinstance(r["sample_rows"], str) else r["sample_rows"],
             "column_types": json.loads(r["column_types"]) if isinstance(r["column_types"], str) else r["column_types"],
+            "seed_data_json": json.loads(r["seed_data_json"]) if isinstance(r["seed_data_json"], str) else r["seed_data_json"],
         }
         for r in rows
     ]
 
 @router.get("/problems/{problem_id}/expected")
 async def get_expected_output(problem_id: str):
-    """Run the reference query and return the expected output columns + rows."""
+    """Run the reference query and return the expected output columns + rows, or retrieve cached output for Python/PySpark."""
     from app.execution.schema_manager import setup_execution_schema, teardown_execution_schema
     from app.execution.runner import execute_user_query, QueryExecutionError
 
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        # Get the reference query
-        sol_row = await conn.fetchrow(
-            "SELECT reference_query FROM core.problem_solutions WHERE problem_id = $1",
+        # Get the problem challenge_type
+        prob = await conn.fetchrow(
+            "SELECT challenge_type FROM core.problems WHERE id = $1",
             problem_id,
         )
-        if not sol_row:
-            raise HTTPException(status_code=404, detail="No solution found for this problem")
+        if not prob:
+            raise HTTPException(status_code=404, detail="Problem not found")
 
-        schema_name = None
-        try:
-            schema_name = await setup_execution_schema(conn, problem_id)
-            result = await execute_user_query(conn, sol_row["reference_query"])
+        if prob["challenge_type"] == "sql":
+            # Get the reference query
+            sol_row = await conn.fetchrow(
+                "SELECT reference_query FROM core.problem_solutions WHERE problem_id = $1",
+                problem_id,
+            )
+            if not sol_row:
+                raise HTTPException(status_code=404, detail="No solution found for this problem")
+
+            schema_name = None
+            try:
+                schema_name = await setup_execution_schema(conn, problem_id)
+                result = await execute_user_query(conn, sol_row["reference_query"])
+                return {
+                    "columns": result["columns"],
+                    "rows": result["rows"],
+                }
+            except QueryExecutionError as e:
+                raise HTTPException(status_code=500, detail=f"Failed to compute expected output: {e}")
+            finally:
+                if schema_name:
+                    await teardown_execution_schema(conn, schema_name)
+        else:
+            sol_row = await conn.fetchrow(
+                "SELECT reference_output FROM core.problem_solutions WHERE problem_id = $1",
+                problem_id,
+            )
+            if not sol_row or not sol_row["reference_output"]:
+                raise HTTPException(status_code=404, detail="No reference output found for this problem")
+            
+            ref_out = sol_row["reference_output"]
+            if isinstance(ref_out, str):
+                ref_out = json.loads(ref_out)
             return {
-                "columns": result["columns"],
-                "rows": result["rows"],
+                "columns": ref_out["columns"],
+                "rows": ref_out["rows"],
             }
-        except QueryExecutionError as e:
-            raise HTTPException(status_code=500, detail=f"Failed to compute expected output: {e}")
-        finally:
-            if schema_name:
-                await teardown_execution_schema(conn, schema_name)
 
 @router.get("/me/streak")
 async def get_my_streak(user=Depends(verify_jwt)):
