@@ -28,6 +28,12 @@ class DailyPracticeCreate(BaseModel):
     easy_problem_id: UUID
     medium_problem_id: UUID
     advanced_problem_id: UUID
+    python_easy_problem_id: Optional[UUID] = None
+    python_medium_problem_id: Optional[UUID] = None
+    python_advanced_problem_id: Optional[UUID] = None
+    pyspark_easy_problem_id: Optional[UUID] = None
+    pyspark_medium_problem_id: Optional[UUID] = None
+    pyspark_advanced_problem_id: Optional[UUID] = None
 
 class WhitelistCreate(BaseModel):
     email: str

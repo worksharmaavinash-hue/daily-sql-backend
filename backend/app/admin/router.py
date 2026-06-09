@@ -75,12 +75,24 @@ async def list_problems():
                 SELECT medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
                 UNION
                 SELECT advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ) AND is_active = false
             """
         )
         rows = await conn.fetch(
             """
-            SELECT id, title, difficulty, description, estimated_time_minutes, is_active, created_at
+            SELECT id, title, difficulty, description, estimated_time_minutes, is_active, created_at, challenge_type
             FROM core.problems
             ORDER BY created_at DESC
             """
@@ -93,6 +105,7 @@ async def list_problems():
             "description": r["description"][:100] + "..." if len(r["description"]) > 100 else r["description"],
             "estimated_time_minutes": r["estimated_time_minutes"],
             "is_active": r["is_active"],
+            "challenge_type": r.get("challenge_type", "sql"),
             "created_at": r["created_at"].isoformat() if r["created_at"] else None
         }
         for r in rows
@@ -160,11 +173,23 @@ async def list_schedule():
                 dp.date,
                 p1.id as easy_id, p1.title as easy_title,
                 p2.id as medium_id, p2.title as medium_title,
-                p3.id as advanced_id, p3.title as advanced_title
+                p3.id as advanced_id, p3.title as advanced_title,
+                py1.id as python_easy_id, py1.title as python_easy_title,
+                py2.id as python_medium_id, py2.title as python_medium_title,
+                py3.id as python_advanced_id, py3.title as python_advanced_title,
+                sp1.id as pyspark_easy_id, sp1.title as pyspark_easy_title,
+                sp2.id as pyspark_medium_id, sp2.title as pyspark_medium_title,
+                sp3.id as pyspark_advanced_id, sp3.title as pyspark_advanced_title
             FROM core.daily_practice dp
             LEFT JOIN core.problems p1 ON dp.easy_problem_id = p1.id
             LEFT JOIN core.problems p2 ON dp.medium_problem_id = p2.id
             LEFT JOIN core.problems p3 ON dp.advanced_problem_id = p3.id
+            LEFT JOIN core.problems py1 ON dp.python_easy_problem_id = py1.id
+            LEFT JOIN core.problems py2 ON dp.python_medium_problem_id = py2.id
+            LEFT JOIN core.problems py3 ON dp.python_advanced_problem_id = py3.id
+            LEFT JOIN core.problems sp1 ON dp.pyspark_easy_problem_id = sp1.id
+            LEFT JOIN core.problems sp2 ON dp.pyspark_medium_problem_id = sp2.id
+            LEFT JOIN core.problems sp3 ON dp.pyspark_advanced_problem_id = sp3.id
             WHERE dp.date >= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date - INTERVAL '7 days'
             ORDER BY dp.date DESC
             """
@@ -174,7 +199,13 @@ async def list_schedule():
             "date": r["date"].isoformat(),
             "easy": {"id": str(r["easy_id"]), "title": r["easy_title"]} if r["easy_id"] else None,
             "medium": {"id": str(r["medium_id"]), "title": r["medium_title"]} if r["medium_id"] else None,
-            "advanced": {"id": str(r["advanced_id"]), "title": r["advanced_title"]} if r["advanced_id"] else None
+            "advanced": {"id": str(r["advanced_id"]), "title": r["advanced_title"]} if r["advanced_id"] else None,
+            "python_easy": {"id": str(r["python_easy_id"]), "title": r["python_easy_title"]} if r["python_easy_id"] else None,
+            "python_medium": {"id": str(r["python_medium_id"]), "title": r["python_medium_title"]} if r["python_medium_id"] else None,
+            "python_advanced": {"id": str(r["python_advanced_id"]), "title": r["python_advanced_title"]} if r["python_advanced_id"] else None,
+            "pyspark_easy": {"id": str(r["pyspark_easy_id"]), "title": r["pyspark_easy_title"]} if r["pyspark_easy_id"] else None,
+            "pyspark_medium": {"id": str(r["pyspark_medium_id"]), "title": r["pyspark_medium_title"]} if r["pyspark_medium_id"] else None,
+            "pyspark_advanced": {"id": str(r["pyspark_advanced_id"]), "title": r["pyspark_advanced_title"]} if r["pyspark_advanced_id"] else None,
         }
         for r in rows
     ]
@@ -196,6 +227,12 @@ async def delete_problem(problem_id: str):
             await conn.execute("UPDATE core.daily_practice SET easy_problem_id = NULL WHERE easy_problem_id = $1", problem_id)
             await conn.execute("UPDATE core.daily_practice SET medium_problem_id = NULL WHERE medium_problem_id = $1", problem_id)
             await conn.execute("UPDATE core.daily_practice SET advanced_problem_id = NULL WHERE advanced_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET python_easy_problem_id = NULL WHERE python_easy_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET python_medium_problem_id = NULL WHERE python_medium_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET python_advanced_problem_id = NULL WHERE python_advanced_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET pyspark_easy_problem_id = NULL WHERE pyspark_easy_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET pyspark_medium_problem_id = NULL WHERE pyspark_medium_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET pyspark_advanced_problem_id = NULL WHERE pyspark_advanced_problem_id = $1", problem_id)
             
             # Finally, delete the problem
             result = await conn.execute(
@@ -376,18 +413,32 @@ async def schedule_daily_practice(payload: DailyPracticeCreate):
         await conn.execute(
             """
             INSERT INTO core.daily_practice
-            (date, easy_problem_id, medium_problem_id, advanced_problem_id)
-            VALUES ($1, $2, $3, $4)
+            (date, easy_problem_id, medium_problem_id, advanced_problem_id,
+             python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+             pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (date)
             DO UPDATE SET
                 easy_problem_id = EXCLUDED.easy_problem_id,
                 medium_problem_id = EXCLUDED.medium_problem_id,
-                advanced_problem_id = EXCLUDED.advanced_problem_id
+                advanced_problem_id = EXCLUDED.advanced_problem_id,
+                python_easy_problem_id = EXCLUDED.python_easy_problem_id,
+                python_medium_problem_id = EXCLUDED.python_medium_problem_id,
+                python_advanced_problem_id = EXCLUDED.python_advanced_problem_id,
+                pyspark_easy_problem_id = EXCLUDED.pyspark_easy_problem_id,
+                pyspark_medium_problem_id = EXCLUDED.pyspark_medium_problem_id,
+                pyspark_advanced_problem_id = EXCLUDED.pyspark_advanced_problem_id
             """,
             payload.date,
             payload.easy_problem_id,
             payload.medium_problem_id,
             payload.advanced_problem_id,
+            payload.python_easy_problem_id,
+            payload.python_medium_problem_id,
+            payload.python_advanced_problem_id,
+            payload.pyspark_easy_problem_id,
+            payload.pyspark_medium_problem_id,
+            payload.pyspark_advanced_problem_id,
         )
 
     return {"status": "scheduled"}
@@ -413,15 +464,14 @@ async def edit_problem(problem_id: str, payload: dict):
             problem_id, *values
         )
     if result == "UPDATE 0":
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Problem not found")
     return {"status": "updated"}
 
 
 @router.patch("/problems/{problem_id}/datasets/{dataset_id}")
 async def edit_dataset(problem_id: str, dataset_id: str, payload: dict):
-    """Edit an existing dataset's schema, seed SQL, or column types."""
-    allowed = {"table_name", "schema_sql", "seed_sql", "column_types"}
+    """Edit an existing dataset's schema, seed SQL, seed data JSON, or column types."""
+    allowed = {"table_name", "schema_sql", "seed_sql", "column_types", "seed_data_json"}
     updates = {k: v for k, v in payload.items() if k in allowed}
     if not updates:
         return {"status": "no_changes"}
@@ -429,29 +479,54 @@ async def edit_dataset(problem_id: str, dataset_id: str, payload: dict):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        # Re-run seed to regenerate sample_rows if schema/seed changed
-        if "schema_sql" in updates or "seed_sql" in updates:
-            from app.execution.schema_manager import generate_schema_name, teardown_execution_schema
-            schema_sql = updates.get("schema_sql") or (await conn.fetchval(
-                "SELECT schema_sql FROM core.problem_datasets WHERE id = $1", dataset_id))
-            seed_sql = updates.get("seed_sql") or (await conn.fetchval(
-                "SELECT seed_sql FROM core.problem_datasets WHERE id = $1", dataset_id))
-            table_name = updates.get("table_name") or (await conn.fetchval(
-                "SELECT table_name FROM core.problem_datasets WHERE id = $1", dataset_id))
+        challenge_type = await conn.fetchval(
+            "SELECT challenge_type FROM core.problems WHERE id = $1",
+            problem_id
+        )
+        if not challenge_type:
+            raise HTTPException(status_code=404, detail="Problem not found")
 
-            schema_name = generate_schema_name()
-            try:
-                await conn.execute(f'CREATE SCHEMA "{schema_name}"')
-                await conn.execute(f'SET search_path TO "{schema_name}"')
-                await conn.execute(schema_sql)
-                await conn.execute(seed_sql)
-                records = await conn.fetch(f"SELECT * FROM {table_name} LIMIT 10")
-                sample_rows = [dict(r) for r in records]
-            finally:
-                await teardown_execution_schema(conn, schema_name)
-                await conn.execute('SET search_path TO public')
+        if challenge_type == 'sql':
+            # Re-run seed to regenerate sample_rows if schema/seed changed
+            if "schema_sql" in updates or "seed_sql" in updates:
+                from app.execution.schema_manager import generate_schema_name, teardown_execution_schema
+                schema_sql = updates.get("schema_sql") or (await conn.fetchval(
+                    "SELECT schema_sql FROM core.problem_datasets WHERE id = $1", dataset_id))
+                seed_sql = updates.get("seed_sql") or (await conn.fetchval(
+                    "SELECT seed_sql FROM core.problem_datasets WHERE id = $1", dataset_id))
+                table_name = updates.get("table_name") or (await conn.fetchval(
+                    "SELECT table_name FROM core.problem_datasets WHERE id = $1", dataset_id))
 
-            updates["sample_rows"] = json.dumps(sample_rows, default=json_serial)
+                schema_name = generate_schema_name()
+                try:
+                    await conn.execute(f'CREATE SCHEMA "{schema_name}"')
+                    await conn.execute(f'SET search_path TO "{schema_name}"')
+                    await conn.execute(schema_sql)
+                    await conn.execute(seed_sql)
+                    records = await conn.fetch(f"SELECT * FROM {table_name} LIMIT 10")
+                    sample_rows = [dict(r) for r in records]
+                finally:
+                    await teardown_execution_schema(conn, schema_name)
+                    await conn.execute('SET search_path TO public')
+
+                updates["sample_rows"] = json.dumps(sample_rows, default=json_serial)
+        else:
+            # Python/PySpark challenge
+            if "seed_data_json" in updates:
+                seed_data = updates["seed_data_json"]
+                if isinstance(seed_data, str):
+                    try:
+                        seed_data = json.loads(seed_data)
+                    except Exception:
+                        pass
+                
+                if isinstance(seed_data, dict):
+                    columns = [c["name"] for c in seed_data.get("columns", [])]
+                    rows = seed_data.get("rows", [])[:10]
+                    sample_rows = [dict(zip(columns, row)) for row in rows]
+                    
+                    updates["sample_rows"] = json.dumps(sample_rows, default=json_serial)
+                    updates["seed_data_json"] = json.dumps(seed_data, default=json_serial)
 
         if "column_types" in updates and isinstance(updates["column_types"], dict):
             updates["column_types"] = json.dumps(updates["column_types"])
@@ -464,7 +539,6 @@ async def edit_dataset(problem_id: str, dataset_id: str, payload: dict):
             dataset_id, problem_id, *values
         )
     if result == "UPDATE 0":
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Dataset not found")
     return {"status": "updated"}
 
@@ -479,7 +553,6 @@ async def delete_dataset(problem_id: str, dataset_id: str):
             dataset_id, problem_id
         )
     if result == "DELETE 0":
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Dataset not found")
     return {"status": "deleted"}
 
@@ -527,13 +600,20 @@ async def edit_solution(problem_id: str, payload: dict):
         set_clauses = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(updates))
         values = list(updates.values())
 
-        result = await conn.execute(
+        exists = await conn.fetchval(
+            "SELECT 1 FROM core.problem_solutions WHERE problem_id = $1",
+            problem_id
+        )
+        if not exists:
+            await conn.execute(
+                "INSERT INTO core.problem_solutions (problem_id) VALUES ($1)",
+                problem_id
+            )
+
+        await conn.execute(
             f"UPDATE core.problem_solutions SET {set_clauses} WHERE problem_id = $1",
             problem_id, *values
         )
-    if result == "UPDATE 0":
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Solution not found")
     return {"status": "updated"}
 
 

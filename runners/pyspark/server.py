@@ -28,6 +28,8 @@ spark = SparkSession.builder \
 executor = ThreadPoolExecutor(max_workers=2)
 
 def serialize_val(val):
+    if pd.isna(val):
+        return None
     if hasattr(val, "isoformat"):
         return val.isoformat()
     if hasattr(val, "to_eng_string"):
@@ -98,12 +100,12 @@ async def execute_code(payload: ExecuteRequest):
         # Run in thread executor with a 10 second timeout limit
         result = await asyncio.wait_for(
             loop.run_in_executor(executor, run_code_in_thread, payload.code, payload.data),
-            timeout=10.0
+            timeout=30.0
         )
         return result
     except asyncio.TimeoutError:
         return {
-            "error": "Execution Timeout: Code took too long to execute (limit: 10 seconds)."
+            "error": "Execution Timeout: Code took too long to execute (limit: 30 seconds)."
         }
 
 if __name__ == "__main__":

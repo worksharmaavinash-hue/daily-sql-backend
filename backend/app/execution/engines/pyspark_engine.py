@@ -1,14 +1,15 @@
 import time
+import os
 import httpx
 from app.execution.engines.base import BaseExecutionEngine
 
 class PySparkEngine(BaseExecutionEngine):
     async def run(self, code: str, problem_id: str, conn, datasets: dict) -> dict:
         start_time = time.perf_counter()
-        url = "http://pyspark-runner:5002/execute"
+        url = os.getenv("PYSPARK_RUNNER_URL", "http://pyspark-runner:5002/execute")
         
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=35.0) as client:
                 response = await client.post(url, json={"code": code, "data": datasets})
                 execution_time_ms = int((time.perf_counter() - start_time) * 1000)
                 

@@ -13,6 +13,8 @@ class ExecuteRequest(BaseModel):
     data: dict
 
 def serialize_val(val):
+    if pd.isna(val):
+        return None
     if hasattr(val, "isoformat"):
         return val.isoformat()
     if hasattr(val, "to_eng_string"):

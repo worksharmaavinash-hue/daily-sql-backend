@@ -1,11 +1,12 @@
 import time
+import os
 import httpx
 from app.execution.engines.base import BaseExecutionEngine
 
 class PythonEngine(BaseExecutionEngine):
     async def run(self, code: str, problem_id: str, conn, datasets: dict) -> dict:
         start_time = time.perf_counter()
-        url = "http://python-runner:5001/execute"
+        url = os.getenv("PYTHON_RUNNER_URL", "http://python-runner:5001/execute")
         
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:

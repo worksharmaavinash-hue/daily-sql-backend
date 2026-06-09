@@ -47,6 +47,18 @@ async def get_today_practice():
                 SELECT medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
                 UNION
                 SELECT advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ) AND is_active = false
             """
         )
@@ -59,7 +71,9 @@ async def get_today_practice():
         # Try today first
         row = await conn.fetchrow(
             """
-            SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id
+            SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id,
+                   python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                   pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
             FROM core.daily_practice
             WHERE date = $1
             """,
@@ -70,7 +84,9 @@ async def get_today_practice():
         if not row:
             row = await conn.fetchrow(
                 """
-                SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id
+                SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id,
+                       python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                       pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
                 FROM core.daily_practice
                 WHERE date <= $1
                 ORDER BY date DESC
@@ -87,6 +103,12 @@ async def get_today_practice():
         "easy": row["easy_problem_id"],
         "medium": row["medium_problem_id"],
         "advanced": row["advanced_problem_id"],
+        "python_easy": row["python_easy_problem_id"],
+        "python_medium": row["python_medium_problem_id"],
+        "python_advanced": row["python_advanced_problem_id"],
+        "pyspark_easy": row["pyspark_easy_problem_id"],
+        "pyspark_medium": row["pyspark_medium_problem_id"],
+        "pyspark_advanced": row["pyspark_advanced_problem_id"],
     }
 
 @router.get("/problems/{problem_id}")
@@ -100,7 +122,11 @@ async def get_problem(problem_id: str):
             FROM core.problems
             WHERE id = $1 AND (is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
-                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                WHERE core.problems.id IN (
+                    easy_problem_id, medium_problem_id, advanced_problem_id,
+                    python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ))
             """,
@@ -122,7 +148,11 @@ async def list_problems():
             FROM core.problems
             WHERE is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
-                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                WHERE core.problems.id IN (
+                    easy_problem_id, medium_problem_id, advanced_problem_id,
+                    python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
             ORDER BY created_at DESC
@@ -334,7 +364,11 @@ async def get_public_profile(username: str):
             FROM core.problems
             WHERE is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
-                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                WHERE core.problems.id IN (
+                    easy_problem_id, medium_problem_id, advanced_problem_id,
+                    python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
             GROUP BY difficulty
@@ -588,7 +622,11 @@ async def get_my_stats(user=Depends(verify_jwt)):
             FROM core.problems
             WHERE is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
-                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                WHERE core.problems.id IN (
+                    easy_problem_id, medium_problem_id, advanced_problem_id,
+                    python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
             GROUP BY difficulty

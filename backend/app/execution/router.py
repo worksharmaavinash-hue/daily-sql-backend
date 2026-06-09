@@ -161,7 +161,8 @@ async def execute_query(
                         user_id=user_id,
                         problem_id=payload.problem_id,
                         status="correct" if is_correct else "incorrect",
-                        execution_time_ms=user_result["execution_time_ms"]
+                        execution_time_ms=user_result["execution_time_ms"],
+                        challenge_type=challenge_type
                     )
 
                     await update_streak(

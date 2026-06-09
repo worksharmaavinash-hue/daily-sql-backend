@@ -35,7 +35,13 @@ CREATE TABLE IF NOT EXISTS core.daily_practice (
     date DATE PRIMARY KEY,
     easy_problem_id UUID REFERENCES core.problems(id),
     medium_problem_id UUID REFERENCES core.problems(id),
-    advanced_problem_id UUID REFERENCES core.problems(id)
+    advanced_problem_id UUID REFERENCES core.problems(id),
+    python_easy_problem_id UUID REFERENCES core.problems(id),
+    python_medium_problem_id UUID REFERENCES core.problems(id),
+    python_advanced_problem_id UUID REFERENCES core.problems(id),
+    pyspark_easy_problem_id UUID REFERENCES core.problems(id),
+    pyspark_medium_problem_id UUID REFERENCES core.problems(id),
+    pyspark_advanced_problem_id UUID REFERENCES core.problems(id)
 );
 
 CREATE TABLE IF NOT EXISTS core.attempts (

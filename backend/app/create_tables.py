@@ -42,6 +42,14 @@ async def init_db():
                 ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS reference_code TEXT;
                 ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS reference_output JSONB;
                 ALTER TABLE core.attempts ADD COLUMN IF NOT EXISTS challenge_type TEXT DEFAULT 'sql';
+                
+                -- NEW DAILY PRACTICE EXPANSION COLUMNS
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS python_easy_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS python_medium_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS python_advanced_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS pyspark_easy_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS pyspark_medium_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS pyspark_advanced_problem_id UUID REFERENCES core.problems(id);
 
                 CREATE TABLE IF NOT EXISTS core.whitelist (
                     email TEXT PRIMARY KEY,
