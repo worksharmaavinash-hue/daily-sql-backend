@@ -44,6 +44,31 @@ def validate_python(code: str):
                 module_name = alias.name.split('.')[0]
                 if module_name in BLOCKED_IMPORTS:
                     raise ValueError(f"Import of module '{module_name}' is not allowed for security reasons")
+        
+        # Block dangerous function calls
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                if node.func.id in ('__import__', 'eval', 'exec', 'compile', 'open',
+                                    'breakpoint', 'input', 'memoryview'):
+                    raise ValueError(f"Use of '{node.func.id}()' is not allowed")
+            
+            # Block builtins/module-level execution functions
+            if isinstance(node.func, ast.Attribute):
+                if node.func.attr in ('__import__', 'system', 'popen', 'exec',
+                                       'call', 'run', 'Popen'):
+                    raise ValueError(f"Use of '.{node.func.attr}()' is not allowed")
+
+        # Block attribute access to dunder methods (except common safe ones)
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith('__') and node.attr.endswith('__'):
+                if node.attr not in ('__init__', '__str__', '__repr__', '__len__',
+                                      '__getitem__', '__setitem__', '__contains__',
+                                      '__iter__', '__next__', '__eq__', '__lt__',
+                                      '__gt__', '__le__', '__ge__', '__ne__',
+                                      '__add__', '__sub__', '__mul__', '__truediv__',
+                                      '__mod__', '__pow__', '__hash__',
+                                      '__enter__', '__exit__', '__name__'):
+                    raise ValueError(f"Access to '{node.attr}' is not allowed")
                 
     return True
 

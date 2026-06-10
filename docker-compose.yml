@@ -31,6 +31,9 @@ services:
       - redis
       - python-runner
       - pyspark-runner
+    networks:
+      - default
+      - runner-net
 
   redis:
     image: redis:7
@@ -46,6 +49,13 @@ services:
     ports:
       - "5001:5001"
     restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+    networks:
+      - runner-net
 
   pyspark-runner:
     build:
@@ -55,7 +65,16 @@ services:
     ports:
       - "5002:5002"
     restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '1.0'
+    networks:
+      - runner-net
+
+networks:
+  runner-net:
 
 volumes:
   dailysql_pgdata:
-

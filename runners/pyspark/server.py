@@ -27,6 +27,36 @@ spark = SparkSession.builder \
 
 executor = ThreadPoolExecutor(max_workers=2)
 
+SAFE_BUILTINS = {
+    # Math & types
+    'abs', 'round', 'min', 'max', 'sum', 'len', 'sorted', 'reversed',
+    'int', 'float', 'str', 'bool', 'list', 'dict', 'tuple', 'set', 'frozenset',
+    'complex', 'bytes', 'bytearray', 'memoryview',
+    # Iteration & functional
+    'range', 'enumerate', 'zip', 'map', 'filter', 'any', 'all',
+    'iter', 'next', 'slice',
+    # String & formatting
+    'format', 'repr', 'chr', 'ord', 'ascii', 'bin', 'hex', 'oct',
+    # Type checking
+    'isinstance', 'issubclass', 'type', 'callable', 'hasattr',
+    'id', 'hash', 'dir', 'vars',
+    # Object construction
+    'object', 'super', 'property', 'staticmethod', 'classmethod',
+    # Exceptions
+    'Exception', 'ValueError', 'TypeError', 'KeyError', 'IndexError',
+    'AttributeError', 'RuntimeError', 'StopIteration', 'ZeroDivisionError',
+    'NotImplementedError', 'OverflowError', 'ArithmeticError',
+    # I/O
+    'print',
+    # Misc
+    'pow', 'divmod',
+}
+
+import builtins
+safe_builtins_dict = {name: getattr(builtins, name) for name in SAFE_BUILTINS if hasattr(builtins, name)}
+# We add __import__ to builtins for internal dependencies, but it is blocked at AST level in validator.py
+safe_builtins_dict['__import__'] = builtins.__import__
+
 def serialize_val(val):
     if pd.isna(val):
         return None
@@ -46,7 +76,7 @@ def run_code_in_thread(code: str, data_payload: dict):
     except Exception:
         pass
 
-    global_namespace = {"spark": spark}
+    global_namespace = {"spark": spark, "__builtins__": safe_builtins_dict}
     try:
         # 1. Reconstruct DataFrames & Views
         for table_name, table_data in data_payload.items():
@@ -60,6 +90,7 @@ def run_code_in_thread(code: str, data_payload: dict):
             df = spark.createDataFrame(pdf)
             
             global_namespace[f"{table_name}_df"] = df
+            global_namespace[table_name] = df
             df.createOrReplaceTempView(table_name)
 
         # 2. Run user code

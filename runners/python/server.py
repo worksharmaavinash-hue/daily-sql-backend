@@ -12,6 +12,36 @@ class ExecuteRequest(BaseModel):
     code: str
     data: dict
 
+SAFE_BUILTINS = {
+    # Math & types
+    'abs', 'round', 'min', 'max', 'sum', 'len', 'sorted', 'reversed',
+    'int', 'float', 'str', 'bool', 'list', 'dict', 'tuple', 'set', 'frozenset',
+    'complex', 'bytes', 'bytearray', 'memoryview',
+    # Iteration & functional
+    'range', 'enumerate', 'zip', 'map', 'filter', 'any', 'all',
+    'iter', 'next', 'slice',
+    # String & formatting
+    'format', 'repr', 'chr', 'ord', 'ascii', 'bin', 'hex', 'oct',
+    # Type checking
+    'isinstance', 'issubclass', 'type', 'callable', 'hasattr',
+    'id', 'hash', 'dir', 'vars',
+    # Object construction
+    'object', 'super', 'property', 'staticmethod', 'classmethod',
+    # Exceptions
+    'Exception', 'ValueError', 'TypeError', 'KeyError', 'IndexError',
+    'AttributeError', 'RuntimeError', 'StopIteration', 'ZeroDivisionError',
+    'NotImplementedError', 'OverflowError', 'ArithmeticError',
+    # I/O
+    'print',
+    # Misc
+    'pow', 'divmod',
+}
+
+import builtins
+safe_builtins_dict = {name: getattr(builtins, name) for name in SAFE_BUILTINS if hasattr(builtins, name)}
+# We add __import__ to builtins for internal dependencies, but it is blocked at AST level in validator.py
+safe_builtins_dict['__import__'] = builtins.__import__
+
 def serialize_val(val):
     if pd.isna(val):
         return None
@@ -24,7 +54,7 @@ def serialize_val(val):
 def execution_worker(code: str, data_payload: dict, pipe_conn):
     try:
         # 1. Reconstruct DataFrames
-        global_namespace = {}
+        global_namespace = {"__builtins__": safe_builtins_dict}
         for table_name, table_data in data_payload.items():
             if isinstance(table_data, str):
                 table_data = json.loads(table_data)
@@ -33,8 +63,9 @@ def execution_worker(code: str, data_payload: dict, pipe_conn):
             rows = table_data["rows"]
             df = pd.DataFrame(rows, columns=cols)
             
-            # Inject standard variable names like "employees_df"
+            # Inject standard variable names like "employees_df" and plain "employees"
             global_namespace[f"{table_name}_df"] = df
+            global_namespace[table_name] = df
 
         # 2. Run user code
         exec(code, global_namespace)
