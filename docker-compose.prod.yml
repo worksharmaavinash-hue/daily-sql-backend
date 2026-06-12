@@ -14,8 +14,11 @@ services:
     depends_on:
       - dailysql-postgres
       - dailysql-redis
+      - python-runner
+      - pyspark-runner
     networks:
       - dailysql-network
+      - runner-net
 
   # Database
   dailysql-postgres:
@@ -39,6 +42,36 @@ services:
     networks:
       - dailysql-network
 
+  # Python Execution Sandbox
+  python-runner:
+    build:
+      context: ./runners/python
+    container_name: dailysql_python_runner_prod
+    image: dailysql-python-runner:latest
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+    networks:
+      - runner-net
+
+  # PySpark Execution Sandbox
+  pyspark-runner:
+    build:
+      context: ./runners/pyspark
+    container_name: dailysql_pyspark_runner_prod
+    image: dailysql-pyspark-runner:latest
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '1.0'
+    networks:
+      - runner-net
+
   # Caddy Reverse Proxy & HTTPS
   caddy:
     image: caddy:2-alpine
@@ -61,7 +94,10 @@ volumes:
   caddy_data:
   caddy_config:
 
-
 networks:
   dailysql-network:
     driver: bridge
+  runner-net:
+    driver: bridge
+    internal: true
+

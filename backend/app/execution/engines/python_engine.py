@@ -9,7 +9,7 @@ class PythonEngine(BaseExecutionEngine):
         url = os.getenv("PYTHON_RUNNER_URL", "http://python-runner:5001/execute")
         
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(url, json={"code": code, "data": datasets})
                 execution_time_ms = int((time.perf_counter() - start_time) * 1000)
                 

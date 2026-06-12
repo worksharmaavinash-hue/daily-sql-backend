@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
+import json
 from app.execution.validator import validate_code
 from app.db import get_pool
 from app.execution.schema_manager import (
@@ -109,7 +110,14 @@ async def execute_query(
                     "SELECT table_name, seed_data_json FROM core.problem_datasets WHERE problem_id = $1",
                     payload.problem_id
                 )
-                payload_data = {d["table_name"]: d["seed_data_json"] for d in datasets}
+                payload_data = {
+                    d["table_name"]: (
+                        json.loads(d["seed_data_json"]) if isinstance(d["seed_data_json"], str)
+                        else d["seed_data_json"]
+                    ) if d["seed_data_json"] is not None else {"columns": [], "rows": []}
+                    for d in datasets
+                }
+
 
                 # Run Docker Sandbox Engine
                 engine = get_engine(challenge_type)
@@ -131,7 +139,6 @@ async def execute_query(
                     }
 
                 expected_result = sol_row["reference_output"]
-                import json
                 if isinstance(expected_result, str):
                     expected_result = json.loads(expected_result)
 

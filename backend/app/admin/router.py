@@ -352,7 +352,13 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
                 "SELECT table_name, seed_data_json FROM core.problem_datasets WHERE problem_id = $1",
                 problem_id
             )
-            payload_data = {d["table_name"]: d["seed_data_json"] for d in datasets}
+            payload_data = {
+                d["table_name"]: (
+                    json.loads(d["seed_data_json"]) if isinstance(d["seed_data_json"], str)
+                    else d["seed_data_json"]
+                ) if d["seed_data_json"] is not None else {"columns": [], "rows": []}
+                for d in datasets
+            }
             
             from app.execution.engines import get_engine
             engine = get_engine(challenge_type)
