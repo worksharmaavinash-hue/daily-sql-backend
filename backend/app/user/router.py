@@ -125,7 +125,7 @@ async def list_problems():
                 WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
-            ORDER BY created_at DESC
+            ORDER BY created_at ASC
             """
         )
     return [dict(r) for r in rows]
