@@ -75,12 +75,24 @@ async def list_problems():
                 SELECT medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
                 UNION
                 SELECT advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ) AND is_active = false
             """
         )
         rows = await conn.fetch(
             """
-            SELECT id, title, difficulty, description, estimated_time_minutes, is_active, created_at
+            SELECT id, title, difficulty, description, estimated_time_minutes, is_active, created_at, challenge_type
             FROM core.problems
             ORDER BY created_at DESC
             """
@@ -93,6 +105,7 @@ async def list_problems():
             "description": r["description"][:100] + "..." if len(r["description"]) > 100 else r["description"],
             "estimated_time_minutes": r["estimated_time_minutes"],
             "is_active": r["is_active"],
+            "challenge_type": r.get("challenge_type", "sql"),
             "created_at": r["created_at"].isoformat() if r["created_at"] else None
         }
         for r in rows
@@ -111,11 +124,11 @@ async def get_problem_details(problem_id: str):
             raise HTTPException(status_code=404, detail="Problem not found")
         
         datasets = await conn.fetch(
-            "SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types FROM core.problem_datasets WHERE problem_id = $1",
+            "SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json FROM core.problem_datasets WHERE problem_id = $1",
             problem_id
         )
         solution = await conn.fetchrow(
-            "SELECT reference_query, order_sensitive, notes FROM core.problem_solutions WHERE problem_id = $1",
+            "SELECT reference_query, reference_code, reference_output, order_sensitive, notes FROM core.problem_solutions WHERE problem_id = $1",
             problem_id
         )
     
@@ -126,19 +139,23 @@ async def get_problem_details(problem_id: str):
         "description": problem["description"],
         "estimated_time_minutes": problem["estimated_time_minutes"],
         "is_active": problem["is_active"],
+        "challenge_type": problem.get("challenge_type", "sql"),
         "datasets": [
             {
                 "id": str(d["id"]),
                 "table_name": d["table_name"],
                 "schema_sql": d["schema_sql"],
                 "seed_sql": d["seed_sql"],
-                "sample_rows": d["sample_rows"],
-                "column_types": d["column_types"]
+                "sample_rows": json.loads(d["sample_rows"]) if isinstance(d["sample_rows"], str) else d["sample_rows"],
+                "column_types": json.loads(d["column_types"]) if isinstance(d["column_types"], str) else d["column_types"],
+                "seed_data_json": json.loads(d["seed_data_json"]) if isinstance(d["seed_data_json"], str) else d["seed_data_json"],
             }
             for d in datasets
         ],
         "solution": {
             "reference_query": solution["reference_query"],
+            "reference_code": solution["reference_code"],
+            "reference_output": json.loads(solution["reference_output"]) if isinstance(solution["reference_output"], str) else solution["reference_output"],
             "order_sensitive": solution["order_sensitive"],
             "notes": solution["notes"]
         } if solution else None
@@ -156,11 +173,23 @@ async def list_schedule():
                 dp.date,
                 p1.id as easy_id, p1.title as easy_title,
                 p2.id as medium_id, p2.title as medium_title,
-                p3.id as advanced_id, p3.title as advanced_title
+                p3.id as advanced_id, p3.title as advanced_title,
+                py1.id as python_easy_id, py1.title as python_easy_title,
+                py2.id as python_medium_id, py2.title as python_medium_title,
+                py3.id as python_advanced_id, py3.title as python_advanced_title,
+                sp1.id as pyspark_easy_id, sp1.title as pyspark_easy_title,
+                sp2.id as pyspark_medium_id, sp2.title as pyspark_medium_title,
+                sp3.id as pyspark_advanced_id, sp3.title as pyspark_advanced_title
             FROM core.daily_practice dp
             LEFT JOIN core.problems p1 ON dp.easy_problem_id = p1.id
             LEFT JOIN core.problems p2 ON dp.medium_problem_id = p2.id
             LEFT JOIN core.problems p3 ON dp.advanced_problem_id = p3.id
+            LEFT JOIN core.problems py1 ON dp.python_easy_problem_id = py1.id
+            LEFT JOIN core.problems py2 ON dp.python_medium_problem_id = py2.id
+            LEFT JOIN core.problems py3 ON dp.python_advanced_problem_id = py3.id
+            LEFT JOIN core.problems sp1 ON dp.pyspark_easy_problem_id = sp1.id
+            LEFT JOIN core.problems sp2 ON dp.pyspark_medium_problem_id = sp2.id
+            LEFT JOIN core.problems sp3 ON dp.pyspark_advanced_problem_id = sp3.id
             WHERE dp.date >= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date - INTERVAL '7 days'
             ORDER BY dp.date DESC
             """
@@ -170,7 +199,13 @@ async def list_schedule():
             "date": r["date"].isoformat(),
             "easy": {"id": str(r["easy_id"]), "title": r["easy_title"]} if r["easy_id"] else None,
             "medium": {"id": str(r["medium_id"]), "title": r["medium_title"]} if r["medium_id"] else None,
-            "advanced": {"id": str(r["advanced_id"]), "title": r["advanced_title"]} if r["advanced_id"] else None
+            "advanced": {"id": str(r["advanced_id"]), "title": r["advanced_title"]} if r["advanced_id"] else None,
+            "python_easy": {"id": str(r["python_easy_id"]), "title": r["python_easy_title"]} if r["python_easy_id"] else None,
+            "python_medium": {"id": str(r["python_medium_id"]), "title": r["python_medium_title"]} if r["python_medium_id"] else None,
+            "python_advanced": {"id": str(r["python_advanced_id"]), "title": r["python_advanced_title"]} if r["python_advanced_id"] else None,
+            "pyspark_easy": {"id": str(r["pyspark_easy_id"]), "title": r["pyspark_easy_title"]} if r["pyspark_easy_id"] else None,
+            "pyspark_medium": {"id": str(r["pyspark_medium_id"]), "title": r["pyspark_medium_title"]} if r["pyspark_medium_id"] else None,
+            "pyspark_advanced": {"id": str(r["pyspark_advanced_id"]), "title": r["pyspark_advanced_title"]} if r["pyspark_advanced_id"] else None,
         }
         for r in rows
     ]
@@ -192,6 +227,12 @@ async def delete_problem(problem_id: str):
             await conn.execute("UPDATE core.daily_practice SET easy_problem_id = NULL WHERE easy_problem_id = $1", problem_id)
             await conn.execute("UPDATE core.daily_practice SET medium_problem_id = NULL WHERE medium_problem_id = $1", problem_id)
             await conn.execute("UPDATE core.daily_practice SET advanced_problem_id = NULL WHERE advanced_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET python_easy_problem_id = NULL WHERE python_easy_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET python_medium_problem_id = NULL WHERE python_medium_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET python_advanced_problem_id = NULL WHERE python_advanced_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET pyspark_easy_problem_id = NULL WHERE pyspark_easy_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET pyspark_medium_problem_id = NULL WHERE pyspark_medium_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET pyspark_advanced_problem_id = NULL WHERE pyspark_advanced_problem_id = $1", problem_id)
             
             # Finally, delete the problem
             result = await conn.execute(
@@ -213,8 +254,8 @@ async def create_problem(payload: ProblemCreate):
         await conn.execute(
             """
             INSERT INTO core.problems
-            (id, title, difficulty, description, estimated_time_minutes, is_active)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            (id, title, difficulty, description, estimated_time_minutes, is_active, challenge_type)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             """,
             problem_id,
             payload.title,
@@ -222,6 +263,7 @@ async def create_problem(payload: ProblemCreate):
             payload.description,
             payload.estimated_time_minutes,
             False,  # New problems start as drafts
+            payload.challenge_type,
         )
 
     return {"problem_id": str(problem_id)}
@@ -232,36 +274,58 @@ async def add_dataset(problem_id: str, payload: DatasetCreate):
     dataset_id = uuid4()
 
     async with pool.acquire() as conn:
-        schema_name = generate_schema_name()
-        
-        try:
-            await conn.execute(f'CREATE SCHEMA "{schema_name}"')
-            await conn.execute(f'SET search_path TO "{schema_name}"')
+        challenge_type = await conn.fetchval(
+            "SELECT challenge_type FROM core.problems WHERE id = $1",
+            problem_id
+        )
+        if not challenge_type:
+            raise HTTPException(status_code=404, detail="Problem not found")
+
+        schema_sql = payload.schema_sql or ""
+        seed_sql = payload.seed_sql or ""
+        seed_data_json_str = None
+
+        if challenge_type == 'sql':
+            # Live Postgres validation for SQL challenges
+            schema_name = generate_schema_name()
+            try:
+                await conn.execute(f'CREATE SCHEMA "{schema_name}"')
+                await conn.execute(f'SET search_path TO "{schema_name}"')
+                
+                # Execute schemas and seed
+                await conn.execute(schema_sql)
+                await conn.execute(seed_sql)
+                
+                # Fetch sample rows
+                records = await conn.fetch(f"SELECT * FROM {payload.table_name} LIMIT 10")
+                sample_rows = [dict(record) for record in records]
+            finally:
+                await teardown_execution_schema(conn, schema_name)
+                await conn.execute('SET search_path TO public')
+        else:
+            # Python/PySpark datasets: Extract sample rows from seed_data_json directly
+            if not payload.seed_data_json:
+                raise HTTPException(status_code=400, detail="seed_data_json is required for python/pyspark challenges")
             
-            # Execute schemas and seed
-            await conn.execute(payload.schema_sql)
-            await conn.execute(payload.seed_sql)
-            
-            # Fetch sample rows
-            records = await conn.fetch(f"SELECT * FROM {payload.table_name} LIMIT 10")
-            sample_rows = [dict(record) for record in records]
-        finally:
-            await teardown_execution_schema(conn, schema_name)
-            await conn.execute('SET search_path TO public')
+            columns = [c["name"] for c in payload.seed_data_json.get("columns", [])]
+            rows = payload.seed_data_json.get("rows", [])[:10]
+            sample_rows = [dict(zip(columns, row)) for row in rows]
+            seed_data_json_str = json.dumps(payload.seed_data_json, default=json_serial)
 
         await conn.execute(
             """
             INSERT INTO core.problem_datasets
-            (id, problem_id, table_name, schema_sql, seed_sql, sample_rows, column_types)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            (id, problem_id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
             dataset_id,
             problem_id,
             payload.table_name,
-            payload.schema_sql,
-            payload.seed_sql,
+            schema_sql,
+            seed_sql,
             json.dumps(sample_rows, default=json_serial),
             json.dumps(payload.column_types),
+            seed_data_json_str
         )
 
     return {"dataset_id": str(dataset_id)}
@@ -271,17 +335,79 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO core.problem_solutions
-            (problem_id, reference_query, order_sensitive, notes)
-            VALUES ($1, $2, $3, $4)
-            """,
-            problem_id,
-            payload.reference_query,
-            payload.order_sensitive,
-            payload.notes,
+        challenge_type = await conn.fetchval(
+            "SELECT challenge_type FROM core.problems WHERE id = $1",
+            problem_id
         )
+        if not challenge_type:
+            raise HTTPException(status_code=404, detail="Problem not found")
+
+        reference_output_json = None
+        if challenge_type != 'sql':
+            if not payload.reference_code:
+                raise HTTPException(status_code=400, detail="reference_code is required for python/pyspark challenges")
+            
+            # Pre-compute and cache the reference output via Docker Engine sandbox
+            datasets = await conn.fetch(
+                "SELECT table_name, seed_data_json FROM core.problem_datasets WHERE problem_id = $1",
+                problem_id
+            )
+            payload_data = {
+                d["table_name"]: (
+                    json.loads(d["seed_data_json"]) if isinstance(d["seed_data_json"], str)
+                    else d["seed_data_json"]
+                ) if d["seed_data_json"] is not None else {"columns": [], "rows": []}
+                for d in datasets
+            }
+            
+            from app.execution.engines import get_engine
+            engine = get_engine(challenge_type)
+            exec_result = await engine.run(payload.reference_code, problem_id, conn, payload_data)
+            
+            if exec_result.get("error"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Admin Reference Code Failed to Execute: {exec_result['error']}"
+                )
+            
+            reference_output_json = json.dumps({
+                "columns": exec_result["columns"],
+                "rows": exec_result["rows"]
+            }, default=json_serial)
+
+        # Upsert support
+        exists = await conn.fetchval(
+            "SELECT 1 FROM core.problem_solutions WHERE problem_id = $1",
+            problem_id
+        )
+        if exists:
+            await conn.execute(
+                """
+                UPDATE core.problem_solutions
+                SET reference_query = $2, reference_code = $3, reference_output = $4, order_sensitive = $5, notes = $6
+                WHERE problem_id = $1
+                """,
+                problem_id,
+                payload.reference_query,
+                payload.reference_code,
+                reference_output_json,
+                payload.order_sensitive,
+                payload.notes
+            )
+        else:
+            await conn.execute(
+                """
+                INSERT INTO core.problem_solutions
+                (problem_id, reference_query, reference_code, reference_output, order_sensitive, notes)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                problem_id,
+                payload.reference_query,
+                payload.reference_code,
+                reference_output_json,
+                payload.order_sensitive,
+                payload.notes,
+            )
 
     return {"status": "solution_saved"}
 
@@ -293,18 +419,32 @@ async def schedule_daily_practice(payload: DailyPracticeCreate):
         await conn.execute(
             """
             INSERT INTO core.daily_practice
-            (date, easy_problem_id, medium_problem_id, advanced_problem_id)
-            VALUES ($1, $2, $3, $4)
+            (date, easy_problem_id, medium_problem_id, advanced_problem_id,
+             python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+             pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (date)
             DO UPDATE SET
                 easy_problem_id = EXCLUDED.easy_problem_id,
                 medium_problem_id = EXCLUDED.medium_problem_id,
-                advanced_problem_id = EXCLUDED.advanced_problem_id
+                advanced_problem_id = EXCLUDED.advanced_problem_id,
+                python_easy_problem_id = EXCLUDED.python_easy_problem_id,
+                python_medium_problem_id = EXCLUDED.python_medium_problem_id,
+                python_advanced_problem_id = EXCLUDED.python_advanced_problem_id,
+                pyspark_easy_problem_id = EXCLUDED.pyspark_easy_problem_id,
+                pyspark_medium_problem_id = EXCLUDED.pyspark_medium_problem_id,
+                pyspark_advanced_problem_id = EXCLUDED.pyspark_advanced_problem_id
             """,
             payload.date,
             payload.easy_problem_id,
             payload.medium_problem_id,
             payload.advanced_problem_id,
+            payload.python_easy_problem_id,
+            payload.python_medium_problem_id,
+            payload.python_advanced_problem_id,
+            payload.pyspark_easy_problem_id,
+            payload.pyspark_medium_problem_id,
+            payload.pyspark_advanced_problem_id,
         )
 
     return {"status": "scheduled"}
@@ -330,15 +470,14 @@ async def edit_problem(problem_id: str, payload: dict):
             problem_id, *values
         )
     if result == "UPDATE 0":
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Problem not found")
     return {"status": "updated"}
 
 
 @router.patch("/problems/{problem_id}/datasets/{dataset_id}")
 async def edit_dataset(problem_id: str, dataset_id: str, payload: dict):
-    """Edit an existing dataset's schema, seed SQL, or column types."""
-    allowed = {"table_name", "schema_sql", "seed_sql", "column_types"}
+    """Edit an existing dataset's schema, seed SQL, seed data JSON, or column types."""
+    allowed = {"table_name", "schema_sql", "seed_sql", "column_types", "seed_data_json"}
     updates = {k: v for k, v in payload.items() if k in allowed}
     if not updates:
         return {"status": "no_changes"}
@@ -346,29 +485,54 @@ async def edit_dataset(problem_id: str, dataset_id: str, payload: dict):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        # Re-run seed to regenerate sample_rows if schema/seed changed
-        if "schema_sql" in updates or "seed_sql" in updates:
-            from app.execution.schema_manager import generate_schema_name, teardown_execution_schema
-            schema_sql = updates.get("schema_sql") or (await conn.fetchval(
-                "SELECT schema_sql FROM core.problem_datasets WHERE id = $1", dataset_id))
-            seed_sql = updates.get("seed_sql") or (await conn.fetchval(
-                "SELECT seed_sql FROM core.problem_datasets WHERE id = $1", dataset_id))
-            table_name = updates.get("table_name") or (await conn.fetchval(
-                "SELECT table_name FROM core.problem_datasets WHERE id = $1", dataset_id))
+        challenge_type = await conn.fetchval(
+            "SELECT challenge_type FROM core.problems WHERE id = $1",
+            problem_id
+        )
+        if not challenge_type:
+            raise HTTPException(status_code=404, detail="Problem not found")
 
-            schema_name = generate_schema_name()
-            try:
-                await conn.execute(f'CREATE SCHEMA "{schema_name}"')
-                await conn.execute(f'SET search_path TO "{schema_name}"')
-                await conn.execute(schema_sql)
-                await conn.execute(seed_sql)
-                records = await conn.fetch(f"SELECT * FROM {table_name} LIMIT 10")
-                sample_rows = [dict(r) for r in records]
-            finally:
-                await teardown_execution_schema(conn, schema_name)
-                await conn.execute('SET search_path TO public')
+        if challenge_type == 'sql':
+            # Re-run seed to regenerate sample_rows if schema/seed changed
+            if "schema_sql" in updates or "seed_sql" in updates:
+                from app.execution.schema_manager import generate_schema_name, teardown_execution_schema
+                schema_sql = updates.get("schema_sql") or (await conn.fetchval(
+                    "SELECT schema_sql FROM core.problem_datasets WHERE id = $1", dataset_id))
+                seed_sql = updates.get("seed_sql") or (await conn.fetchval(
+                    "SELECT seed_sql FROM core.problem_datasets WHERE id = $1", dataset_id))
+                table_name = updates.get("table_name") or (await conn.fetchval(
+                    "SELECT table_name FROM core.problem_datasets WHERE id = $1", dataset_id))
 
-            updates["sample_rows"] = json.dumps(sample_rows, default=json_serial)
+                schema_name = generate_schema_name()
+                try:
+                    await conn.execute(f'CREATE SCHEMA "{schema_name}"')
+                    await conn.execute(f'SET search_path TO "{schema_name}"')
+                    await conn.execute(schema_sql)
+                    await conn.execute(seed_sql)
+                    records = await conn.fetch(f"SELECT * FROM {table_name} LIMIT 10")
+                    sample_rows = [dict(r) for r in records]
+                finally:
+                    await teardown_execution_schema(conn, schema_name)
+                    await conn.execute('SET search_path TO public')
+
+                updates["sample_rows"] = json.dumps(sample_rows, default=json_serial)
+        else:
+            # Python/PySpark challenge
+            if "seed_data_json" in updates:
+                seed_data = updates["seed_data_json"]
+                if isinstance(seed_data, str):
+                    try:
+                        seed_data = json.loads(seed_data)
+                    except Exception:
+                        pass
+                
+                if isinstance(seed_data, dict):
+                    columns = [c["name"] for c in seed_data.get("columns", [])]
+                    rows = seed_data.get("rows", [])[:10]
+                    sample_rows = [dict(zip(columns, row)) for row in rows]
+                    
+                    updates["sample_rows"] = json.dumps(sample_rows, default=json_serial)
+                    updates["seed_data_json"] = json.dumps(seed_data, default=json_serial)
 
         if "column_types" in updates and isinstance(updates["column_types"], dict):
             updates["column_types"] = json.dumps(updates["column_types"])
@@ -381,7 +545,6 @@ async def edit_dataset(problem_id: str, dataset_id: str, payload: dict):
             dataset_id, problem_id, *values
         )
     if result == "UPDATE 0":
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Dataset not found")
     return {"status": "updated"}
 
@@ -396,7 +559,6 @@ async def delete_dataset(problem_id: str, dataset_id: str):
             dataset_id, problem_id
         )
     if result == "DELETE 0":
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Dataset not found")
     return {"status": "deleted"}
 
@@ -404,23 +566,60 @@ async def delete_dataset(problem_id: str, dataset_id: str):
 @router.patch("/problems/{problem_id}/solution")
 async def edit_solution(problem_id: str, payload: dict):
     """Edit the reference solution for a problem."""
-    allowed = {"reference_query", "order_sensitive", "notes"}
+    allowed = {"reference_query", "reference_code", "order_sensitive", "notes"}
     updates = {k: v for k, v in payload.items() if k in allowed}
     if not updates:
         return {"status": "no_changes"}
 
     pool = await get_pool()
-    set_clauses = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(updates))
-    values = list(updates.values())
-
     async with pool.acquire() as conn:
-        result = await conn.execute(
+        challenge_type = await conn.fetchval(
+            "SELECT challenge_type FROM core.problems WHERE id = $1",
+            problem_id
+        )
+        if not challenge_type:
+            raise HTTPException(status_code=404, detail="Problem not found")
+
+        if challenge_type != 'sql' and "reference_code" in updates:
+            # Re-compute and cache the reference output via Docker Engine sandbox
+            datasets = await conn.fetch(
+                "SELECT table_name, seed_data_json FROM core.problem_datasets WHERE problem_id = $1",
+                problem_id
+            )
+            payload_data = {d["table_name"]: d["seed_data_json"] for d in datasets}
+            
+            from app.execution.engines import get_engine
+            engine = get_engine(challenge_type)
+            exec_result = await engine.run(updates["reference_code"], problem_id, conn, payload_data)
+            
+            if exec_result.get("error"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Admin Reference Code Failed to Execute: {exec_result['error']}"
+                )
+            
+            updates["reference_output"] = json.dumps({
+                "columns": exec_result["columns"],
+                "rows": exec_result["rows"]
+            }, default=json_serial)
+
+        set_clauses = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(updates))
+        values = list(updates.values())
+
+        exists = await conn.fetchval(
+            "SELECT 1 FROM core.problem_solutions WHERE problem_id = $1",
+            problem_id
+        )
+        if not exists:
+            await conn.execute(
+                "INSERT INTO core.problem_solutions (problem_id) VALUES ($1)",
+                problem_id
+            )
+
+        await conn.execute(
             f"UPDATE core.problem_solutions SET {set_clauses} WHERE problem_id = $1",
             problem_id, *values
         )
-    if result == "UPDATE 0":
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Solution not found")
     return {"status": "updated"}
 
 

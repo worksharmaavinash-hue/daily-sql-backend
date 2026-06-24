@@ -34,6 +34,23 @@ async def init_db():
                 ALTER TABLE core.users ADD COLUMN IF NOT EXISTS source TEXT;
                 ALTER TABLE core.users ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN DEFAULT FALSE;
                 ALTER TABLE core.problem_datasets ADD COLUMN IF NOT EXISTS column_types JSONB NOT NULL DEFAULT '{}'::jsonb;
+                
+                -- NEW PYTHON/PYSPARK MIGRATIONS
+                ALTER TABLE core.problems ADD COLUMN IF NOT EXISTS challenge_type TEXT NOT NULL DEFAULT 'sql' CHECK (challenge_type IN ('sql', 'python', 'pyspark'));
+                ALTER TABLE core.problem_datasets ADD COLUMN IF NOT EXISTS seed_data_json JSONB;
+                ALTER TABLE core.problem_solutions ALTER COLUMN reference_query DROP NOT NULL;
+                ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS reference_code TEXT;
+                ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS reference_output JSONB;
+                ALTER TABLE core.attempts ADD COLUMN IF NOT EXISTS challenge_type TEXT DEFAULT 'sql';
+                
+                -- NEW DAILY PRACTICE EXPANSION COLUMNS
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS python_easy_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS python_medium_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS python_advanced_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS pyspark_easy_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS pyspark_medium_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS pyspark_advanced_problem_id UUID REFERENCES core.problems(id);
+
                 CREATE TABLE IF NOT EXISTS core.whitelist (
                     email TEXT PRIMARY KEY,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -41,8 +58,8 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS core.waitlist (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     email TEXT UNIQUE NOT NULL,
-                    full_name TEXT NOT NULL,
                     whatsapp_number TEXT,
+                    full_name TEXT NOT NULL,
                     occupation TEXT,
                     job_role TEXT,
                     experience_years INTEGER,

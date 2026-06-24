@@ -3,7 +3,7 @@ version: "3.9"
 services:
   postgres:
     image: postgres:15
-    container_name: dailysql-postgres
+    container_name: dailysql-postgres-experimental
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -15,7 +15,7 @@ services:
 
   api:
     build: ./backend
-    container_name: dailysql-api
+    container_name: dailysql-api-experimental
     env_file:
       - .env
     environment:
@@ -29,12 +29,52 @@ services:
     depends_on:
       - postgres
       - redis
+      - python-runner
+      - pyspark-runner
+    networks:
+      - default
+      - runner-net
 
   redis:
     image: redis:7
-    container_name: dailysql-redis
+    container_name: dailysql-redis-experimental
     ports:
       - "6379:6379"
+
+  python-runner:
+    build:
+      context: ./runners/python
+    container_name: dailysql-python-runner-experimental
+    image: dailysql-python-runner:latest
+    ports:
+      - "5001:5001"
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+    networks:
+      - runner-net
+
+  pyspark-runner:
+    build:
+      context: ./runners/pyspark
+    container_name: dailysql-pyspark-runner-experimental
+    image: dailysql-pyspark-runner:latest
+    ports:
+      - "5002:5002"
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '1.0'
+    networks:
+      - runner-net
+
+networks:
+  runner-net:
 
 volumes:
   dailysql_pgdata:

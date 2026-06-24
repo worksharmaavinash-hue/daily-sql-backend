@@ -47,6 +47,18 @@ async def get_today_practice():
                 SELECT medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
                 UNION
                 SELECT advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT python_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT pyspark_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ) AND is_active = false
             """
         )
@@ -59,7 +71,9 @@ async def get_today_practice():
         # Try today first
         row = await conn.fetchrow(
             """
-            SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id
+            SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id,
+                   python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                   pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
             FROM core.daily_practice
             WHERE date = $1
             """,
@@ -70,7 +84,9 @@ async def get_today_practice():
         if not row:
             row = await conn.fetchrow(
                 """
-                SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id
+                SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id,
+                       python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                       pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
                 FROM core.daily_practice
                 WHERE date <= $1
                 ORDER BY date DESC
@@ -87,6 +103,12 @@ async def get_today_practice():
         "easy": row["easy_problem_id"],
         "medium": row["medium_problem_id"],
         "advanced": row["advanced_problem_id"],
+        "python_easy": row["python_easy_problem_id"],
+        "python_medium": row["python_medium_problem_id"],
+        "python_advanced": row["python_advanced_problem_id"],
+        "pyspark_easy": row["pyspark_easy_problem_id"],
+        "pyspark_medium": row["pyspark_medium_problem_id"],
+        "pyspark_advanced": row["pyspark_advanced_problem_id"],
     }
 
 @router.get("/problems/{problem_id}")
@@ -96,11 +118,15 @@ async def get_problem(problem_id: str):
     async with pool.acquire() as conn:
         problem = await conn.fetchrow(
             """
-            SELECT id, title, difficulty, description, estimated_time_minutes
+            SELECT id, title, difficulty, description, estimated_time_minutes, challenge_type
             FROM core.problems
             WHERE id = $1 AND (is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
-                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                WHERE core.problems.id IN (
+                    easy_problem_id, medium_problem_id, advanced_problem_id,
+                    python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ))
             """,
@@ -118,11 +144,15 @@ async def list_problems():
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, title, difficulty, description, estimated_time_minutes
+            SELECT id, title, difficulty, description, estimated_time_minutes, challenge_type
             FROM core.problems
             WHERE is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
-                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                WHERE core.problems.id IN (
+                    easy_problem_id, medium_problem_id, advanced_problem_id,
+                    python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
             ORDER BY created_at ASC
@@ -137,7 +167,7 @@ async def get_problem_datasets(problem_id: str):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types
+            SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json
             FROM core.problem_datasets
             WHERE problem_id = $1
             """,
@@ -155,40 +185,65 @@ async def get_problem_datasets(problem_id: str):
             "seed_sql": r["seed_sql"],
             "sample_rows": json.loads(r["sample_rows"]) if isinstance(r["sample_rows"], str) else r["sample_rows"],
             "column_types": json.loads(r["column_types"]) if isinstance(r["column_types"], str) else r["column_types"],
+            "seed_data_json": json.loads(r["seed_data_json"]) if isinstance(r["seed_data_json"], str) else r["seed_data_json"],
         }
         for r in rows
     ]
 
 @router.get("/problems/{problem_id}/expected")
 async def get_expected_output(problem_id: str):
-    """Run the reference query and return the expected output columns + rows."""
+    """Run the reference query and return the expected output columns + rows, or retrieve cached output for Python/PySpark."""
     from app.execution.schema_manager import setup_execution_schema, teardown_execution_schema
     from app.execution.runner import execute_user_query, QueryExecutionError
 
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        # Get the reference query
-        sol_row = await conn.fetchrow(
-            "SELECT reference_query FROM core.problem_solutions WHERE problem_id = $1",
+        # Get the problem challenge_type
+        prob = await conn.fetchrow(
+            "SELECT challenge_type FROM core.problems WHERE id = $1",
             problem_id,
         )
-        if not sol_row:
-            raise HTTPException(status_code=404, detail="No solution found for this problem")
+        if not prob:
+            raise HTTPException(status_code=404, detail="Problem not found")
 
-        schema_name = None
-        try:
-            schema_name = await setup_execution_schema(conn, problem_id)
-            result = await execute_user_query(conn, sol_row["reference_query"])
+        if prob["challenge_type"] == "sql":
+            # Get the reference query
+            sol_row = await conn.fetchrow(
+                "SELECT reference_query FROM core.problem_solutions WHERE problem_id = $1",
+                problem_id,
+            )
+            if not sol_row:
+                raise HTTPException(status_code=404, detail="No solution found for this problem")
+
+            schema_name = None
+            try:
+                schema_name = await setup_execution_schema(conn, problem_id)
+                result = await execute_user_query(conn, sol_row["reference_query"])
+                return {
+                    "columns": result["columns"],
+                    "rows": result["rows"],
+                }
+            except QueryExecutionError as e:
+                raise HTTPException(status_code=500, detail=f"Failed to compute expected output: {e}")
+            finally:
+                if schema_name:
+                    await teardown_execution_schema(conn, schema_name)
+        else:
+            sol_row = await conn.fetchrow(
+                "SELECT reference_output FROM core.problem_solutions WHERE problem_id = $1",
+                problem_id,
+            )
+            if not sol_row or not sol_row["reference_output"]:
+                raise HTTPException(status_code=404, detail="No reference output found for this problem")
+            
+            ref_out = sol_row["reference_output"]
+            if isinstance(ref_out, str):
+                ref_out = json.loads(ref_out)
             return {
-                "columns": result["columns"],
-                "rows": result["rows"],
+                "columns": ref_out["columns"],
+                "rows": ref_out["rows"],
             }
-        except QueryExecutionError as e:
-            raise HTTPException(status_code=500, detail=f"Failed to compute expected output: {e}")
-        finally:
-            if schema_name:
-                await teardown_execution_schema(conn, schema_name)
 
 @router.get("/me/streak")
 async def get_my_streak(user=Depends(verify_jwt)):
@@ -309,7 +364,11 @@ async def get_public_profile(username: str):
             FROM core.problems
             WHERE is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
-                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                WHERE core.problems.id IN (
+                    easy_problem_id, medium_problem_id, advanced_problem_id,
+                    python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
             GROUP BY difficulty
@@ -563,7 +622,11 @@ async def get_my_stats(user=Depends(verify_jwt)):
             FROM core.problems
             WHERE is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
-                WHERE (easy_problem_id = core.problems.id OR medium_problem_id = core.problems.id OR advanced_problem_id = core.problems.id)
+                WHERE core.problems.id IN (
+                    easy_problem_id, medium_problem_id, advanced_problem_id,
+                    python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
             GROUP BY difficulty
