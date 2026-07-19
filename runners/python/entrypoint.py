@@ -2,6 +2,10 @@
 Sandboxed execution entrypoint.
 Reads JSON payload from stdin, runs user code in a restricted namespace, writes JSON result to stdout.
 This runs as a fresh subprocess for every execution request (no forking, no event loop corruption).
+
+Modes:
+  - "dataframe": existing Pandas mode — expects result = pd.DataFrame
+  - "dsa":       new DSA mode — calls user-defined function against test cases
 """
 import sys
 import json
@@ -41,15 +45,9 @@ def serialize_val(val):
         return float(val)
     return val
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-        code = payload["code"]
-        data_payload = payload["data"]
-    except Exception as e:
-        json.dump({"error": f"Invalid input: {e}"}, sys.stdout)
-        sys.exit(0)
 
+def run_dataframe(code, data_payload):
+    """Existing Pandas/DataFrame mode — unchanged."""
     global_namespace = {"__builtins__": safe_builtins_dict, "pd": pd}
     try:
         for table_name, table_data in data_payload.items():
@@ -78,6 +76,91 @@ def main():
 
     except Exception as e:
         json.dump({"error": f"Runtime Error: {str(e)}\n{traceback.format_exc()}"}, sys.stdout)
+
+
+def run_dsa(code, test_cases, function_name):
+    """
+    DSA mode: exec the user's code, then call function_name(*args) for each test case.
+    Returns {"mode": "dsa", "results": [...]} or {"error": "..."}.
+    """
+    import collections
+    import heapq
+    import bisect
+    import functools
+    import math
+    import itertools
+
+    # Build a namespace with safe builtins + DSA-standard algorithmic modules
+    # These are pure-computation modules with no I/O or OS access
+    dsa_namespace = {
+        "__builtins__": safe_builtins_dict,
+        "collections": collections,
+        "heapq": heapq,
+        "bisect": bisect,
+        "functools": functools,
+        "math": math,
+        "itertools": itertools,
+    }
+
+    try:
+        exec(code, dsa_namespace)
+    except Exception as e:
+        json.dump({"error": f"Runtime Error: {str(e)}\n{traceback.format_exc()}"}, sys.stdout)
+        return
+
+    if function_name not in dsa_namespace:
+        json.dump({
+            "error": f"Missing function '{function_name}'. Please define your solution as 'def {function_name}(...)'."
+        }, sys.stdout)
+        return
+
+    fn = dsa_namespace[function_name]
+    results = []
+    for tc in test_cases:
+        args = tc.get("input_data", {}).get("args", [])
+        expected = tc.get("expected")
+        try:
+            got = fn(*args)
+            # Normalize comparison: lists vs tuples, etc.
+            passed = (got == expected)
+            results.append({
+                "passed": passed,
+                "got": got,
+                "expected": expected,
+                "label": tc.get("label"),
+                "is_hidden": tc.get("is_hidden", False),
+            })
+        except Exception as e:
+            results.append({
+                "passed": False,
+                "error": str(e),
+                "got": None,
+                "expected": expected,
+                "label": tc.get("label"),
+                "is_hidden": tc.get("is_hidden", False),
+            })
+
+    json.dump({"mode": "dsa", "results": results, "error": None}, sys.stdout)
+
+
+def main():
+    try:
+        payload = json.load(sys.stdin)
+        code = payload["code"]
+        mode = payload.get("mode", "dataframe")
+    except Exception as e:
+        json.dump({"error": f"Invalid input: {e}"}, sys.stdout)
+        sys.exit(0)
+
+    if mode == "dsa":
+        run_dsa(
+            code,
+            payload.get("test_cases", []),
+            payload.get("function_name", "solve"),
+        )
+    else:
+        run_dataframe(code, payload.get("data", {}))
+
 
 if __name__ == "__main__":
     main()

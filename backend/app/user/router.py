@@ -59,6 +59,12 @@ async def get_today_practice():
                 SELECT pyspark_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
                 UNION
                 SELECT pyspark_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT dsa_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT dsa_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT dsa_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ) AND is_active = false
             """
         )
@@ -73,7 +79,8 @@ async def get_today_practice():
             """
             SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id,
                    python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-                   pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                   pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+                   dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
             FROM core.daily_practice
             WHERE date = $1
             """,
@@ -86,7 +93,8 @@ async def get_today_practice():
                 """
                 SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id,
                        python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-                       pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                       pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+                       dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
                 FROM core.daily_practice
                 WHERE date <= $1
                 ORDER BY date DESC
@@ -109,6 +117,9 @@ async def get_today_practice():
         "pyspark_easy": row["pyspark_easy_problem_id"],
         "pyspark_medium": row["pyspark_medium_problem_id"],
         "pyspark_advanced": row["pyspark_advanced_problem_id"],
+        "dsa_easy": row["dsa_easy_problem_id"],
+        "dsa_medium": row["dsa_medium_problem_id"],
+        "dsa_advanced": row["dsa_advanced_problem_id"],
     }
 
 @router.get("/problems/{problem_id}")

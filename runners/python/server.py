@@ -3,12 +3,22 @@ import asyncio
 import traceback
 from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import Any, List, Optional
 
 app = FastAPI(title="DailySQL Python Runner Service")
 
+class TestCase(BaseModel):
+    input_data: dict          # {"args": [[1,2,3], 9]}
+    expected: Any             # any JSON value
+    is_hidden: bool = False
+    label: Optional[str] = None
+
 class ExecuteRequest(BaseModel):
     code: str
-    data: dict
+    data: dict = {}
+    mode: str = "dataframe"           # "dataframe" | "dsa"
+    test_cases: List[TestCase] = []   # only used when mode == "dsa"
+    function_name: str = "solve"      # only used when mode == "dsa"
 
 TIMEOUT_SECONDS = 10.0
 
@@ -18,7 +28,13 @@ async def execute_code(payload: ExecuteRequest):
     Spawn a fresh subprocess for each execution request.
     This avoids fork()/event-loop corruption from multiprocessing.
     """
-    input_payload = json.dumps({"code": payload.code, "data": payload.data})
+    input_payload = json.dumps({
+        "code": payload.code,
+        "data": payload.data,
+        "mode": payload.mode,
+        "test_cases": [tc.model_dump() for tc in payload.test_cases],
+        "function_name": payload.function_name,
+    })
 
     try:
         process = await asyncio.create_subprocess_exec(
