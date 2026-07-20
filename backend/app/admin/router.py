@@ -18,6 +18,7 @@ import json
 import os
 from datetime import date, datetime
 from decimal import Decimal
+from typing import List
 from uuid import UUID as PyUUID
 from app.admin.analytics_router import router as analytics_router
 
@@ -451,7 +452,7 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
                 """
                 UPDATE core.problem_solutions
                 SET reference_query = $2, reference_code = $3, reference_output = $4,
-                    order_sensitive = $5, notes = $6, function_name = $7
+                    order_sensitive = $5, notes = $6, function_name = $7, starter_code = $8
                 WHERE problem_id = $1
                 """,
                 problem_id,
@@ -461,13 +462,14 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
                 payload.order_sensitive,
                 payload.notes,
                 payload.function_name,
+                payload.starter_code,
             )
         else:
             await conn.execute(
                 """
                 INSERT INTO core.problem_solutions
-                (problem_id, reference_query, reference_code, reference_output, order_sensitive, notes, function_name)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (problem_id, reference_query, reference_code, reference_output, order_sensitive, notes, function_name, starter_code)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 """,
                 problem_id,
                 payload.reference_query,
@@ -476,6 +478,7 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
                 payload.order_sensitive,
                 payload.notes,
                 payload.function_name,
+                payload.starter_code,
             )
 
     return {"status": "solution_saved"}
@@ -863,6 +866,40 @@ async def add_test_case(problem_id: str, payload: TestCaseCreate):
             payload.order_index,
         )
     return {"test_case_id": str(tc_id)}
+
+
+@router.post("/problems/{problem_id}/test-cases/bulk")
+async def add_test_cases_bulk(problem_id: str, payload: List[TestCaseCreate]):
+    """Bulk add test cases to a DSA problem."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        challenge_type = await conn.fetchval(
+            "SELECT challenge_type FROM core.problems WHERE id = $1", problem_id
+        )
+        if not challenge_type:
+            raise HTTPException(status_code=404, detail="Problem not found")
+        if challenge_type != 'python_dsa':
+            raise HTTPException(status_code=400, detail="Test cases are only for python_dsa problems")
+
+        async with conn.transaction():
+            inserted_ids = []
+            for tc in payload:
+                tc_id = await conn.fetchval(
+                    """
+                    INSERT INTO core.problem_test_cases
+                    (problem_id, input_data, expected, is_hidden, label, order_index)
+                    VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6)
+                    RETURNING id
+                    """,
+                    problem_id,
+                    json.dumps(tc.input_data),
+                    json.dumps(tc.expected),
+                    tc.is_hidden,
+                    tc.label,
+                    tc.order_index,
+                )
+                inserted_ids.append(str(tc_id))
+    return {"inserted_count": len(inserted_ids), "test_case_ids": inserted_ids}
 
 
 @router.get("/problems/{problem_id}/test-cases")

@@ -21,6 +21,7 @@ class SolutionCreate(BaseModel):
     reference_query: Optional[str] = None
     reference_code: Optional[str] = None
     function_name: Optional[str] = None  # DSA only: e.g. "twoSum", "maxSubArray"
+    starter_code: Optional[str] = None   # DSA only: full function stub shown to users, e.g. "def twoSum(nums: List[int], target: int) -> List[int]:"
     order_sensitive: bool = False
     notes: Optional[str] = None
 
