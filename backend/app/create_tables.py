@@ -45,6 +45,7 @@ async def init_db():
                 ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS reference_code TEXT;
                 ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS reference_output JSONB;
                 ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS function_name TEXT;
+                ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS starter_code TEXT;
                 ALTER TABLE core.attempts ADD COLUMN IF NOT EXISTS challenge_type TEXT DEFAULT 'sql';
                 
                 -- NEW DAILY PRACTICE EXPANSION COLUMNS

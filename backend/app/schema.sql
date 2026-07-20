@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS core.problem_solutions (
     reference_output JSONB,
     order_sensitive BOOLEAN DEFAULT FALSE,
     notes TEXT,
-    function_name TEXT  -- DSA only: e.g. 'twoSum', 'maxSubArray'
+    function_name TEXT,  -- DSA only: e.g. 'twoSum', 'maxSubArray'
+    starter_code TEXT   -- DSA only: starter function template
 );
 
 CREATE TABLE IF NOT EXISTS core.daily_practice (
