@@ -36,11 +36,15 @@ async def init_db():
                 ALTER TABLE core.problem_datasets ADD COLUMN IF NOT EXISTS column_types JSONB NOT NULL DEFAULT '{}'::jsonb;
                 
                 -- NEW PYTHON/PYSPARK MIGRATIONS
-                ALTER TABLE core.problems ADD COLUMN IF NOT EXISTS challenge_type TEXT NOT NULL DEFAULT 'sql' CHECK (challenge_type IN ('sql', 'python', 'pyspark'));
+                ALTER TABLE core.problems ADD COLUMN IF NOT EXISTS challenge_type TEXT NOT NULL DEFAULT 'sql';
+                ALTER TABLE core.problems DROP CONSTRAINT IF EXISTS problems_challenge_type_check;
+                ALTER TABLE core.problems ADD CONSTRAINT problems_challenge_type_check CHECK (challenge_type IN ('sql', 'python', 'pyspark', 'python_dsa'));
+                
                 ALTER TABLE core.problem_datasets ADD COLUMN IF NOT EXISTS seed_data_json JSONB;
                 ALTER TABLE core.problem_solutions ALTER COLUMN reference_query DROP NOT NULL;
                 ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS reference_code TEXT;
                 ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS reference_output JSONB;
+                ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS function_name TEXT;
                 ALTER TABLE core.attempts ADD COLUMN IF NOT EXISTS challenge_type TEXT DEFAULT 'sql';
                 
                 -- NEW DAILY PRACTICE EXPANSION COLUMNS
@@ -50,6 +54,9 @@ async def init_db():
                 ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS pyspark_easy_problem_id UUID REFERENCES core.problems(id);
                 ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS pyspark_medium_problem_id UUID REFERENCES core.problems(id);
                 ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS pyspark_advanced_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS dsa_easy_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS dsa_medium_problem_id UUID REFERENCES core.problems(id);
+                ALTER TABLE core.daily_practice ADD COLUMN IF NOT EXISTS dsa_advanced_problem_id UUID REFERENCES core.problems(id);
 
                 CREATE TABLE IF NOT EXISTS core.whitelist (
                     email TEXT PRIMARY KEY,
@@ -71,6 +78,26 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS core.wa_group_members (
                     user_id   UUID PRIMARY KEY REFERENCES core.users(user_id) ON DELETE CASCADE,
                     added_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS core.problem_test_cases (
+                    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    problem_id  UUID NOT NULL REFERENCES core.problems(id) ON DELETE CASCADE,
+                    input_data  JSONB NOT NULL,
+                    expected    JSONB NOT NULL,
+                    is_hidden   BOOLEAN DEFAULT TRUE,
+                    label       TEXT,
+                    order_index INT DEFAULT 0,
+                    created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS problem_test_cases_problem_id_idx ON core.problem_test_cases(problem_id);
+
+                CREATE TABLE IF NOT EXISTS core.comment_votes (
+                    user_id    UUID NOT NULL REFERENCES core.users(user_id) ON DELETE CASCADE,
+                    comment_id UUID NOT NULL REFERENCES core.comments(id) ON DELETE CASCADE,
+                    vote_type  SMALLINT NOT NULL CHECK (vote_type IN (1, -1)),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    PRIMARY KEY (user_id, comment_id)
                 );
 
 
