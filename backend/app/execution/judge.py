@@ -63,8 +63,10 @@ def compare_dsa_results(results: list):
             "is_hidden": is_hidden,
             "error": r.get("error"),
             "got": r.get("got"),
-            # Hidden tests: show expected only if they passed (no spoiling), mask on failure
-            "expected": r.get("expected") if (not is_hidden or passed) else "hidden",
+            # Only expose input_data for non-hidden tests (no spoilers)
+            "input_data": r.get("input_data") if not is_hidden else None,
+            # Hidden tests: show expected only if they failed (for display) or are not hidden
+            "expected": r.get("expected") if (not is_hidden or not passed) else "hidden",
         }
         client_results.append(client_result)
 

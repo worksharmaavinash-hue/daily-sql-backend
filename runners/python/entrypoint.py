@@ -130,7 +130,9 @@ def run_dsa(code, test_cases, function_name):
                 "label": tc.get("label"),
                 "is_hidden": tc.get("is_hidden", False),
             })
-        except Exception as e:
+        except BaseException as e:
+            # Catch ALL errors (including RecursionError, MemoryError, etc.)
+            # per-case so that a crash on one test never stops the remaining tests.
             results.append({
                 "passed": False,
                 "error": str(e),

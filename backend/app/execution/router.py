@@ -219,7 +219,14 @@ async def execute_query(
                         "test_summary": None,
                     }
 
-                is_correct, reason, test_summary = compare_dsa_results(runner_result["results"])
+                # Merge input_data back from our test_cases list into the runner
+                # results (the runner container only echoes back got/expected/error).
+                raw_results = runner_result.get("results", [])
+                for i, r in enumerate(raw_results):
+                    if i < len(test_cases):
+                        r["input_data"] = test_cases[i].get("input_data")
+
+                is_correct, reason, test_summary = compare_dsa_results(raw_results)
 
                 # Record attempt + update streak only on Submit mode
                 if user and not is_run_mode:
