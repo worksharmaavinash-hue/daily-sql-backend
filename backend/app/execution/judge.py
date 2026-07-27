@@ -1,13 +1,11 @@
 def compare_results(user_result, expected_result, order_sensitive=False):
     """
     Compare user execution result with expected result.
+    Used for SQL, Python (Pandas), and PySpark problems.
     Returns (is_correct, diff_reason)
     """
-    
+
     # 1. Check schemas/columns match
-    # Normalizing columns? For now assume strict match needed or at least length match.
-    # Usually we want column names to match or just values?
-    # LeetCode usually requires specific column names.
     if user_result["columns"] != expected_result["columns"]:
         return False, f"Column mismatch. Expected {expected_result['columns']}, got {user_result['columns']}"
 
@@ -31,3 +29,51 @@ def compare_results(user_result, expected_result, order_sensitive=False):
         return False, "Row data mismatch. Your results do not match the expected output."
 
     return True, None
+
+
+def compare_dsa_results(results: list):
+    """
+    Compare DSA test case execution results.
+    Used exclusively for python_dsa problems.
+
+    Args:
+        results: list of per-test-case result dicts from the runner.
+                 Each has: passed, got, expected, label, is_hidden, error (optional)
+
+    Returns:
+        (is_correct, diff_reason, test_summary_for_client)
+
+    Visibility rules:
+        - Sample tests (is_hidden=False): show full got vs expected on failure
+        - Hidden tests (is_hidden=True):  show got but mask expected as "hidden"
+        - All tests passing: no masking needed (nothing to spoil)
+    """
+    total = len(results)
+    passed_count = sum(1 for r in results if r.get("passed"))
+    is_correct = (passed_count == total)
+    diff_reason = None if is_correct else f"{passed_count}/{total} test cases passed."
+
+    client_results = []
+    for r in results:
+        is_hidden = r.get("is_hidden", False)
+        passed = r.get("passed", False)
+        client_result = {
+            "passed": passed,
+            "label": r.get("label"),
+            "is_hidden": is_hidden,
+            "error": r.get("error"),
+            "got": r.get("got"),
+            # Only expose input_data for non-hidden tests (no spoilers)
+            "input_data": r.get("input_data") if not is_hidden else None,
+            # Hidden tests: show expected only if they failed (for display) or are not hidden
+            "expected": r.get("expected") if (not is_hidden or not passed) else "hidden",
+        }
+        client_results.append(client_result)
+
+    test_summary = {
+        "passed": passed_count,
+        "total": total,
+        "results": client_results,
+    }
+
+    return is_correct, diff_reason, test_summary

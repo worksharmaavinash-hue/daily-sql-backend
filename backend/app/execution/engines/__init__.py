@@ -5,7 +5,7 @@ from app.execution.engines.pyspark_engine import PySparkEngine
 def get_engine(challenge_type: str):
     if challenge_type == 'sql':
         return PostgresEngine()
-    elif challenge_type == 'python':
+    elif challenge_type in ('python', 'python_dsa'):
         return PythonEngine()
     elif challenge_type == 'pyspark':
         return PySparkEngine()

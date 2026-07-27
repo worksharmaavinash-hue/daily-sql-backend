@@ -4,9 +4,9 @@
 
 echo "🚀 Deploying DailySQL Test Environment..."
 
-# 1. Pull latest experimental changes
-echo "📥 Pulling latest code from experimental branch..."
-git pull origin experimental
+# 1. Pull latest python-dsa changes
+echo "📥 Pulling latest code from python-dsa branch..."
+git pull origin python-dsa
 
 # 2. Rebuild & Restart Containers from Staging Compose File
 echo "🐳 Rebuilding staging containers..."

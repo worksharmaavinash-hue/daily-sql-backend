@@ -7,6 +7,7 @@ from app.admin.schemas import (
     ProblemCreate,
     DatasetCreate,
     SolutionCreate,
+    TestCaseCreate,
     DailyPracticeCreate,
     WhitelistCreate,
     WhitelistBulkCreate
@@ -17,6 +18,7 @@ import json
 import os
 from datetime import date, datetime
 from decimal import Decimal
+from typing import List
 from uuid import UUID as PyUUID
 from app.admin.analytics_router import router as analytics_router
 
@@ -179,7 +181,10 @@ async def list_schedule():
                 py3.id as python_advanced_id, py3.title as python_advanced_title,
                 sp1.id as pyspark_easy_id, sp1.title as pyspark_easy_title,
                 sp2.id as pyspark_medium_id, sp2.title as pyspark_medium_title,
-                sp3.id as pyspark_advanced_id, sp3.title as pyspark_advanced_title
+                sp3.id as pyspark_advanced_id, sp3.title as pyspark_advanced_title,
+                d1.id as dsa_easy_id, d1.title as dsa_easy_title,
+                d2.id as dsa_medium_id, d2.title as dsa_medium_title,
+                d3.id as dsa_advanced_id, d3.title as dsa_advanced_title
             FROM core.daily_practice dp
             LEFT JOIN core.problems p1 ON dp.easy_problem_id = p1.id
             LEFT JOIN core.problems p2 ON dp.medium_problem_id = p2.id
@@ -190,6 +195,9 @@ async def list_schedule():
             LEFT JOIN core.problems sp1 ON dp.pyspark_easy_problem_id = sp1.id
             LEFT JOIN core.problems sp2 ON dp.pyspark_medium_problem_id = sp2.id
             LEFT JOIN core.problems sp3 ON dp.pyspark_advanced_problem_id = sp3.id
+            LEFT JOIN core.problems d1 ON dp.dsa_easy_problem_id = d1.id
+            LEFT JOIN core.problems d2 ON dp.dsa_medium_problem_id = d2.id
+            LEFT JOIN core.problems d3 ON dp.dsa_advanced_problem_id = d3.id
             WHERE dp.date >= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date - INTERVAL '7 days'
             ORDER BY dp.date DESC
             """
@@ -206,6 +214,9 @@ async def list_schedule():
             "pyspark_easy": {"id": str(r["pyspark_easy_id"]), "title": r["pyspark_easy_title"]} if r["pyspark_easy_id"] else None,
             "pyspark_medium": {"id": str(r["pyspark_medium_id"]), "title": r["pyspark_medium_title"]} if r["pyspark_medium_id"] else None,
             "pyspark_advanced": {"id": str(r["pyspark_advanced_id"]), "title": r["pyspark_advanced_title"]} if r["pyspark_advanced_id"] else None,
+            "dsa_easy": {"id": str(r["dsa_easy_id"]), "title": r["dsa_easy_title"]} if r["dsa_easy_id"] else None,
+            "dsa_medium": {"id": str(r["dsa_medium_id"]), "title": r["dsa_medium_title"]} if r["dsa_medium_id"] else None,
+            "dsa_advanced": {"id": str(r["dsa_advanced_id"]), "title": r["dsa_advanced_title"]} if r["dsa_advanced_id"] else None,
         }
         for r in rows
     ]
@@ -219,6 +230,7 @@ async def delete_problem(problem_id: str):
     async with pool.acquire() as conn:
         async with conn.transaction():
             # The schema doesn't have ON DELETE CASCADE, so we manually clean up references
+            await conn.execute("DELETE FROM core.problem_test_cases WHERE problem_id = $1", problem_id)
             await conn.execute("DELETE FROM core.problem_datasets WHERE problem_id = $1", problem_id)
             await conn.execute("DELETE FROM core.problem_solutions WHERE problem_id = $1", problem_id)
             await conn.execute("DELETE FROM core.attempts WHERE problem_id = $1", problem_id)
@@ -233,6 +245,9 @@ async def delete_problem(problem_id: str):
             await conn.execute("UPDATE core.daily_practice SET pyspark_easy_problem_id = NULL WHERE pyspark_easy_problem_id = $1", problem_id)
             await conn.execute("UPDATE core.daily_practice SET pyspark_medium_problem_id = NULL WHERE pyspark_medium_problem_id = $1", problem_id)
             await conn.execute("UPDATE core.daily_practice SET pyspark_advanced_problem_id = NULL WHERE pyspark_advanced_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET dsa_easy_problem_id = NULL WHERE dsa_easy_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET dsa_medium_problem_id = NULL WHERE dsa_medium_problem_id = $1", problem_id)
+            await conn.execute("UPDATE core.daily_practice SET dsa_advanced_problem_id = NULL WHERE dsa_advanced_problem_id = $1", problem_id)
             
             # Finally, delete the problem
             result = await conn.execute(
@@ -342,8 +357,60 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
         if not challenge_type:
             raise HTTPException(status_code=404, detail="Problem not found")
 
-        reference_output_json = None
-        if challenge_type != 'sql':
+        if challenge_type == 'python_dsa':
+            # DSA problems: validate reference_code + function_name, then dry-run against test cases
+            if not payload.reference_code:
+                raise HTTPException(status_code=400, detail="reference_code is required for python_dsa challenges")
+            if not payload.function_name:
+                raise HTTPException(status_code=400, detail="function_name is required for python_dsa challenges (e.g. 'twoSum')")
+
+            # Fetch test cases to validate reference code against them
+            test_case_rows = await conn.fetch(
+                "SELECT input_data, expected, label, is_hidden FROM core.problem_test_cases WHERE problem_id = $1 ORDER BY order_index",
+                problem_id
+            )
+            if not test_case_rows:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Add at least one test case before saving the solution."
+                )
+            test_cases = [
+                {
+                    "input_data": (json.loads(r["input_data"]) if isinstance(r["input_data"], str) else r["input_data"]),
+                    "expected":   (json.loads(r["expected"])   if isinstance(r["expected"],   str) else r["expected"]),
+                    "label":      r["label"],
+                    "is_hidden":  r["is_hidden"],
+                }
+                for r in test_case_rows
+            ]
+
+            from app.execution.engines import get_engine
+            engine = get_engine(challenge_type)
+            exec_result = await engine.run(
+                payload.reference_code, problem_id, conn, {},
+                test_cases=test_cases, function_name=payload.function_name
+            )
+
+            if exec_result.get("error"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Reference code failed to execute: {exec_result['error']}"
+                )
+
+            # Verify all test cases pass with the reference solution
+            failed = [r for r in exec_result.get("results", []) if not r.get("passed")]
+            if failed:
+                labels = ", ".join(r.get("label") or "unlabeled" for r in failed)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Reference code failed {len(failed)} test case(s): {labels}. Fix the reference code or the test cases."
+                )
+
+            # For DSA, no reference_output — test cases are the ground truth
+            reference_output_json = None
+
+        elif challenge_type != 'sql':
+            # Python (Pandas) / PySpark: pre-compute and cache reference_output
             if not payload.reference_code:
                 raise HTTPException(status_code=400, detail="reference_code is required for python/pyspark challenges")
             
@@ -384,7 +451,8 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
             await conn.execute(
                 """
                 UPDATE core.problem_solutions
-                SET reference_query = $2, reference_code = $3, reference_output = $4, order_sensitive = $5, notes = $6
+                SET reference_query = $2, reference_code = $3, reference_output = $4,
+                    order_sensitive = $5, notes = $6, function_name = $7, starter_code = $8
                 WHERE problem_id = $1
                 """,
                 problem_id,
@@ -392,14 +460,16 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
                 payload.reference_code,
                 reference_output_json,
                 payload.order_sensitive,
-                payload.notes
+                payload.notes,
+                payload.function_name,
+                payload.starter_code,
             )
         else:
             await conn.execute(
                 """
                 INSERT INTO core.problem_solutions
-                (problem_id, reference_query, reference_code, reference_output, order_sensitive, notes)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                (problem_id, reference_query, reference_code, reference_output, order_sensitive, notes, function_name, starter_code)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 """,
                 problem_id,
                 payload.reference_query,
@@ -407,6 +477,8 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
                 reference_output_json,
                 payload.order_sensitive,
                 payload.notes,
+                payload.function_name,
+                payload.starter_code,
             )
 
     return {"status": "solution_saved"}
@@ -421,8 +493,9 @@ async def schedule_daily_practice(payload: DailyPracticeCreate):
             INSERT INTO core.daily_practice
             (date, easy_problem_id, medium_problem_id, advanced_problem_id,
              python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-             pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+             dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (date)
             DO UPDATE SET
                 easy_problem_id = EXCLUDED.easy_problem_id,
@@ -433,7 +506,10 @@ async def schedule_daily_practice(payload: DailyPracticeCreate):
                 python_advanced_problem_id = EXCLUDED.python_advanced_problem_id,
                 pyspark_easy_problem_id = EXCLUDED.pyspark_easy_problem_id,
                 pyspark_medium_problem_id = EXCLUDED.pyspark_medium_problem_id,
-                pyspark_advanced_problem_id = EXCLUDED.pyspark_advanced_problem_id
+                pyspark_advanced_problem_id = EXCLUDED.pyspark_advanced_problem_id,
+                dsa_easy_problem_id = EXCLUDED.dsa_easy_problem_id,
+                dsa_medium_problem_id = EXCLUDED.dsa_medium_problem_id,
+                dsa_advanced_problem_id = EXCLUDED.dsa_advanced_problem_id
             """,
             payload.date,
             payload.easy_problem_id,
@@ -445,6 +521,9 @@ async def schedule_daily_practice(payload: DailyPracticeCreate):
             payload.pyspark_easy_problem_id,
             payload.pyspark_medium_problem_id,
             payload.pyspark_advanced_problem_id,
+            payload.dsa_easy_problem_id,
+            payload.dsa_medium_problem_id,
+            payload.dsa_advanced_problem_id,
         )
 
     return {"status": "scheduled"}
@@ -757,6 +836,192 @@ async def remove_from_whitelist(email: str):
     return {"status": "removed"}
 
 
+# ============ DSA TEST CASE MANAGEMENT ============
+
+@router.post("/problems/{problem_id}/test-cases")
+async def add_test_case(problem_id: str, payload: TestCaseCreate):
+    """Add a test case to a DSA problem."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        challenge_type = await conn.fetchval(
+            "SELECT challenge_type FROM core.problems WHERE id = $1", problem_id
+        )
+        if not challenge_type:
+            raise HTTPException(status_code=404, detail="Problem not found")
+        if challenge_type != 'python_dsa':
+            raise HTTPException(status_code=400, detail="Test cases are only for python_dsa problems")
+
+        tc_id = await conn.fetchval(
+            """
+            INSERT INTO core.problem_test_cases
+            (problem_id, input_data, expected, is_hidden, label, order_index)
+            VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6)
+            RETURNING id
+            """,
+            problem_id,
+            json.dumps(payload.input_data),
+            json.dumps(payload.expected),
+            payload.is_hidden,
+            payload.label,
+            payload.order_index,
+        )
+    return {"test_case_id": str(tc_id)}
+
+
+@router.post("/problems/{problem_id}/test-cases/bulk")
+async def add_test_cases_bulk(problem_id: str, payload: List[TestCaseCreate]):
+    """Bulk add test cases to a DSA problem."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        challenge_type = await conn.fetchval(
+            "SELECT challenge_type FROM core.problems WHERE id = $1", problem_id
+        )
+        if not challenge_type:
+            raise HTTPException(status_code=404, detail="Problem not found")
+        if challenge_type != 'python_dsa':
+            raise HTTPException(status_code=400, detail="Test cases are only for python_dsa problems")
+
+        async with conn.transaction():
+            inserted_ids = []
+            for tc in payload:
+                tc_id = await conn.fetchval(
+                    """
+                    INSERT INTO core.problem_test_cases
+                    (problem_id, input_data, expected, is_hidden, label, order_index)
+                    VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6)
+                    RETURNING id
+                    """,
+                    problem_id,
+                    json.dumps(tc.input_data),
+                    json.dumps(tc.expected),
+                    tc.is_hidden,
+                    tc.label,
+                    tc.order_index,
+                )
+                inserted_ids.append(str(tc_id))
+    return {"inserted_count": len(inserted_ids), "test_case_ids": inserted_ids}
+
+
+@router.get("/problems/{problem_id}/test-cases")
+async def list_test_cases(problem_id: str):
+    """List all test cases for a DSA problem (admin view — shows all including hidden)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, input_data, expected, is_hidden, label, order_index, created_at
+            FROM core.problem_test_cases
+            WHERE problem_id = $1
+            ORDER BY order_index, created_at
+            """,
+            problem_id,
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "input_data": json.loads(r["input_data"]) if isinstance(r["input_data"], str) else r["input_data"],
+            "expected": json.loads(r["expected"]) if isinstance(r["expected"], str) else r["expected"],
+            "is_hidden": r["is_hidden"],
+            "label": r["label"],
+            "order_index": r["order_index"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+@router.patch("/problems/{problem_id}/test-cases/{test_case_id}")
+async def edit_test_case(problem_id: str, test_case_id: str, payload: dict):
+    """Edit a test case's fields."""
+    allowed = {"input_data", "expected", "is_hidden", "label", "order_index"}
+    updates = {k: v for k, v in payload.items() if k in allowed}
+    if not updates:
+        return {"status": "no_changes"}
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Serialize JSON fields
+        if "input_data" in updates:
+            updates["input_data"] = json.dumps(updates["input_data"])
+        if "expected" in updates:
+            updates["expected"] = json.dumps(updates["expected"])
+
+        set_clauses = ", ".join(f"{k} = ${i+3}" for i, k in enumerate(updates))
+        values = list(updates.values())
+
+        result = await conn.execute(
+            f"UPDATE core.problem_test_cases SET {set_clauses} WHERE id = $1 AND problem_id = $2",
+            test_case_id, problem_id, *values
+        )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Test case not found")
+    return {"status": "updated"}
+
+
+@router.delete("/problems/{problem_id}/test-cases/{test_case_id}")
+async def delete_test_case(problem_id: str, test_case_id: str):
+    """Delete a single test case."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM core.problem_test_cases WHERE id = $1 AND problem_id = $2",
+            test_case_id, problem_id
+        )
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Test case not found")
+    return {"status": "deleted"}
+
+
+@router.post("/problems/{problem_id}/test-cases/dry-run")
+async def dry_run_test_cases(problem_id: str, payload: dict):
+    """
+    Admin dry-run: execute provided reference code against all test cases for this problem.
+    Returns per-case pass/fail without saving anything.
+    Useful during problem creation before committing the solution.
+    """
+    reference_code = payload.get("reference_code", "")
+    function_name = payload.get("function_name", "solve")
+
+    if not reference_code:
+        raise HTTPException(status_code=400, detail="reference_code is required")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        test_case_rows = await conn.fetch(
+            "SELECT input_data, expected, label, is_hidden FROM core.problem_test_cases WHERE problem_id = $1 ORDER BY order_index",
+            problem_id,
+        )
+        if not test_case_rows:
+            raise HTTPException(status_code=400, detail="No test cases found for this problem")
+
+        test_cases = [
+            {
+                "input_data": (json.loads(r["input_data"]) if isinstance(r["input_data"], str) else r["input_data"]),
+                "expected":   (json.loads(r["expected"])   if isinstance(r["expected"],   str) else r["expected"]),
+                "label":      r["label"],
+                "is_hidden":  r["is_hidden"],
+            }
+            for r in test_case_rows
+        ]
+
+        from app.execution.engines import get_engine
+        engine = get_engine("python_dsa")
+        exec_result = await engine.run(
+            reference_code, problem_id, conn, {},
+            test_cases=test_cases, function_name=function_name
+        )
+
+    if exec_result.get("error"):
+        return {"error": exec_result["error"], "results": []}
+
+    results = exec_result.get("results", [])
+    passed = sum(1 for r in results if r.get("passed"))
+    return {
+        "error": None,
+        "passed": passed,
+        "total": len(results),
+        "results": results,
+    }
 @router.post("/whitelist/bulk")
 async def bulk_add_to_whitelist(payload: WhitelistBulkCreate):
     """Bulk add emails to the whitelist."""

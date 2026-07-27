@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS core.problems (
     description TEXT NOT NULL,
     estimated_time_minutes INTEGER NOT NULL,
     is_active BOOLEAN DEFAULT TRUE,
-    challenge_type TEXT NOT NULL DEFAULT 'sql' CHECK (challenge_type IN ('sql', 'python', 'pyspark')),
+    challenge_type TEXT NOT NULL DEFAULT 'sql' CHECK (challenge_type IN ('sql', 'python', 'pyspark', 'python_dsa')),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS core.problem_solutions (
     reference_code TEXT,
     reference_output JSONB,
     order_sensitive BOOLEAN DEFAULT FALSE,
-    notes TEXT
+    notes TEXT,
+    function_name TEXT,  -- DSA only: e.g. 'twoSum', 'maxSubArray'
+    starter_code TEXT   -- DSA only: starter function template
 );
 
 CREATE TABLE IF NOT EXISTS core.daily_practice (
@@ -41,8 +43,24 @@ CREATE TABLE IF NOT EXISTS core.daily_practice (
     python_advanced_problem_id UUID REFERENCES core.problems(id),
     pyspark_easy_problem_id UUID REFERENCES core.problems(id),
     pyspark_medium_problem_id UUID REFERENCES core.problems(id),
-    pyspark_advanced_problem_id UUID REFERENCES core.problems(id)
+    pyspark_advanced_problem_id UUID REFERENCES core.problems(id),
+    dsa_easy_problem_id UUID REFERENCES core.problems(id),
+    dsa_medium_problem_id UUID REFERENCES core.problems(id),
+    dsa_advanced_problem_id UUID REFERENCES core.problems(id)
 );
+
+-- Test cases for DSA (python_dsa) problems
+CREATE TABLE IF NOT EXISTS core.problem_test_cases (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    problem_id  UUID NOT NULL REFERENCES core.problems(id) ON DELETE CASCADE,
+    input_data  JSONB NOT NULL,  -- {"args": [[2,7,11,15], 9]} — positional args matching function signature
+    expected    JSONB NOT NULL,  -- any JSON-serializable value: int, list, str, bool, etc.
+    is_hidden   BOOLEAN DEFAULT TRUE,  -- false = sample (shown to user), true = hidden (grading only)
+    label       TEXT,            -- e.g. "Example 1", "Edge case: empty array"
+    order_index INT DEFAULT 0,
+    created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS problem_test_cases_problem_id_idx ON core.problem_test_cases(problem_id);
 
 CREATE TABLE IF NOT EXISTS core.attempts (
     id UUID PRIMARY KEY,

@@ -59,6 +59,12 @@ async def get_today_practice():
                 SELECT pyspark_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
                 UNION
                 SELECT pyspark_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT dsa_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT dsa_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                UNION
+                SELECT dsa_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ) AND is_active = false
             """
         )
@@ -73,7 +79,8 @@ async def get_today_practice():
             """
             SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id,
                    python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-                   pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                   pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+                   dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
             FROM core.daily_practice
             WHERE date = $1
             """,
@@ -86,7 +93,8 @@ async def get_today_practice():
                 """
                 SELECT date, easy_problem_id, medium_problem_id, advanced_problem_id,
                        python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-                       pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                       pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+                       dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
                 FROM core.daily_practice
                 WHERE date <= $1
                 ORDER BY date DESC
@@ -109,6 +117,9 @@ async def get_today_practice():
         "pyspark_easy": row["pyspark_easy_problem_id"],
         "pyspark_medium": row["pyspark_medium_problem_id"],
         "pyspark_advanced": row["pyspark_advanced_problem_id"],
+        "dsa_easy": row["dsa_easy_problem_id"],
+        "dsa_medium": row["dsa_medium_problem_id"],
+        "dsa_advanced": row["dsa_advanced_problem_id"],
     }
 
 @router.get("/problems/{problem_id}")
@@ -118,11 +129,14 @@ async def get_problem(problem_id: str):
     async with pool.acquire() as conn:
         problem = await conn.fetchrow(
             """
-            SELECT id, title, difficulty, description, estimated_time_minutes, challenge_type
-            FROM core.problems
-            WHERE id = $1 AND (is_active = true OR EXISTS (
+            SELECT DISTINCT ON (p.id) p.id, p.title, p.difficulty, p.description,
+                   p.estimated_time_minutes, p.challenge_type,
+                   ps.function_name, ps.starter_code
+            FROM core.problems p
+            LEFT JOIN core.problem_solutions ps ON ps.problem_id = p.id
+            WHERE p.id = $1 AND (p.is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
-                WHERE core.problems.id IN (
+                WHERE p.id IN (
                     easy_problem_id, medium_problem_id, advanced_problem_id,
                     python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
                     pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
@@ -144,18 +158,21 @@ async def list_problems():
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, title, difficulty, description, estimated_time_minutes, challenge_type
-            FROM core.problems
-            WHERE is_active = true OR EXISTS (
+            SELECT DISTINCT ON (p.id) p.id, p.title, p.difficulty, p.description,
+                   p.estimated_time_minutes, p.challenge_type,
+                   ps.function_name, ps.starter_code
+            FROM core.problems p
+            LEFT JOIN core.problem_solutions ps ON ps.problem_id = p.id
+            WHERE p.is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice 
-                WHERE core.problems.id IN (
+                WHERE p.id IN (
                     easy_problem_id, medium_problem_id, advanced_problem_id,
                     python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
                     pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
                 )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
-            ORDER BY created_at ASC
+            ORDER BY p.id, p.created_at ASC
             """
         )
     return [dict(r) for r in rows]
@@ -206,6 +223,10 @@ async def get_expected_output(problem_id: str):
         )
         if not prob:
             raise HTTPException(status_code=404, detail="Problem not found")
+
+        if prob["challenge_type"] == "python_dsa":
+            # DSA problems don't have a tabular expected output — test cases are in problem_test_cases
+            raise HTTPException(status_code=404, detail="DSA problems do not have expected output")
 
         if prob["challenge_type"] == "sql":
             # Get the reference query

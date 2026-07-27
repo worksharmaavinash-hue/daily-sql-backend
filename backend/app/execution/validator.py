@@ -75,7 +75,7 @@ def validate_python(code: str):
 def validate_code(code: str, challenge_type: str):
     if challenge_type == 'sql':
         return validate_sql(code)
-    elif challenge_type in ('python', 'pyspark'):
+    elif challenge_type in ('python', 'pyspark', 'python_dsa'):
         return validate_python(code)
     return True
 
