@@ -261,7 +261,7 @@ async def execute_query(
 
                 return {
                     # "run_result" signals the frontend this was a dry-run (no badge/streak update)
-                    "status": "correct" if is_correct else ("run_result" if is_run_mode else "incorrect"),
+                    "status": "run_result" if is_run_mode else ("correct" if is_correct else "incorrect"),
                     "user": None,
                     "expected": None,
                     "error": None,
