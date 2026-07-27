@@ -158,7 +158,7 @@ async def list_problems():
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT DISTINCT ON (p.id) p.id, p.title, p.difficulty, p.description,
+            SELECT DISTINCT ON (p.created_at, p.id) p.id, p.title, p.difficulty, p.description,
                    p.estimated_time_minutes, p.challenge_type,
                    ps.function_name, ps.starter_code
             FROM core.problems p
@@ -172,7 +172,7 @@ async def list_problems():
                 )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
-            ORDER BY p.id, p.created_at ASC
+            ORDER BY p.created_at ASC, p.id
             """
         )
     return [dict(r) for r in rows]
