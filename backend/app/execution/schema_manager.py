@@ -3,11 +3,14 @@ import uuid
 def generate_schema_name() -> str:
     return f"run_{uuid.uuid4().hex[:8]}"
 
+
 async def setup_execution_schema(conn, problem_id: str):
     """
-    1. Create isolated schema
+    1. Create isolated Postgres schema
     2. Set search_path
-    3. Load tables & data
+    3. Load tables & data — prefers stored schema_sql/seed_sql; regenerates
+       from seed_data_json via SqlDialectGenerator when schema_sql is absent
+       (new datasets created via the unified JSON descriptor flow).
     """
     schema_name = generate_schema_name()
 
@@ -20,7 +23,7 @@ async def setup_execution_schema(conn, problem_id: str):
     # Load datasets for the problem
     datasets = await conn.fetch(
         """
-        SELECT table_name, schema_sql, seed_sql
+        SELECT table_name, schema_sql, seed_sql, seed_data_json
         FROM core.problem_datasets
         WHERE problem_id = $1
         """,
@@ -31,16 +34,40 @@ async def setup_execution_schema(conn, problem_id: str):
         raise RuntimeError("No datasets defined for this problem")
 
     for ds in datasets:
-        # Create table
-        await conn.execute(ds["schema_sql"])
-        # Seed data
-        await conn.execute(ds["seed_sql"])
+        schema_sql = ds["schema_sql"]
+        seed_sql = ds["seed_sql"]
+
+        if not schema_sql:
+            # Regenerate from seed_data_json using SqlDialectGenerator
+            raw_json = ds["seed_data_json"]
+            if raw_json:
+                import json as _json
+                from app.execution.sql_dialect_generator import SqlDialectGenerator
+                _gen = SqlDialectGenerator()
+                descriptor = _json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+                if _gen.has_schema_metadata(descriptor):
+                    schema_sql, seed_sql = _gen.generate(
+                        descriptor, ds["table_name"], "postgresql"
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Dataset '{ds['table_name']}' has no schema_sql and no JSON descriptor with schema metadata."
+                    )
+            else:
+                raise RuntimeError(
+                    f"Dataset '{ds['table_name']}' has no schema_sql and no seed_data_json to regenerate from."
+                )
+
+        await conn.execute(schema_sql)
+        if seed_sql:
+            await conn.execute(seed_sql)
 
     return schema_name
 
+
+
 async def teardown_execution_schema(conn, schema_name: str):
     await conn.execute(f'DROP SCHEMA "{schema_name}" CASCADE')
-
 
 
 async def apply_execution_limits(conn):

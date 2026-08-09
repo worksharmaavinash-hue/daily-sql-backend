@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS core.problem_datasets (
 CREATE TABLE IF NOT EXISTS core.problem_solutions (
     problem_id UUID REFERENCES core.problems(id),
     reference_query TEXT,
+    mysql_reference_query TEXT,
     reference_code TEXT,
     reference_output JSONB,
     order_sensitive BOOLEAN DEFAULT FALSE,

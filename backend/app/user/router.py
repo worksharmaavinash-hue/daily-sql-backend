@@ -155,6 +155,8 @@ async def get_problem(problem_id: str):
 @router.get("/problems")
 async def list_problems():
     pool = await get_pool()
+    from app.execution.sql_dialect_generator import SqlDialectGenerator
+    _gen = SqlDialectGenerator()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -175,7 +177,27 @@ async def list_problems():
             ORDER BY p.created_at ASC, p.id
             """
         )
-    return [dict(r) for r in rows]
+        # Fetch which problems have MySQL support (for supported_dialects)
+        dialect_rows = await conn.fetch(
+            """
+            SELECT DISTINCT problem_id
+            FROM core.problem_datasets
+            WHERE mysql_schema_sql IS NOT NULL
+            """
+        )
+        # Build a set of problem IDs that have at least one MySQL-supported dataset
+        dual_dialect_ids = {str(r["problem_id"]) for r in dialect_rows}
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        prob_id = str(d["id"])
+        if d.get("challenge_type") == "sql" and prob_id in dual_dialect_ids:
+            d["supported_dialects"] = ["postgresql", "mysql"]
+        else:
+            d["supported_dialects"] = ["postgresql"] if d.get("challenge_type") == "sql" else []
+        result.append(d)
+    return result
 
 @router.get("/problems/{problem_id}/datasets")
 async def get_problem_datasets(problem_id: str):
@@ -184,7 +206,7 @@ async def get_problem_datasets(problem_id: str):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json
+            SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json, mysql_schema_sql, mysql_seed_sql
             FROM core.problem_datasets
             WHERE problem_id = $1
             """,
@@ -200,6 +222,8 @@ async def get_problem_datasets(problem_id: str):
             "table_name": r["table_name"],
             "schema_sql": r["schema_sql"],
             "seed_sql": r["seed_sql"],
+            "mysql_schema_sql": r["mysql_schema_sql"],
+            "mysql_seed_sql": r["mysql_seed_sql"],
             "sample_rows": json.loads(r["sample_rows"]) if isinstance(r["sample_rows"], str) else r["sample_rows"],
             "column_types": json.loads(r["column_types"]) if isinstance(r["column_types"], str) else r["column_types"],
             "seed_data_json": json.loads(r["seed_data_json"]) if isinstance(r["seed_data_json"], str) else r["seed_data_json"],

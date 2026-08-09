@@ -12,13 +12,27 @@ class ProblemCreate(BaseModel):
 
 class DatasetCreate(BaseModel):
     table_name: str
+    # ── Primary source (recommended) ──────────────────────────────────────────
+    # A dialect-agnostic JSON descriptor; SQL for all dialects is auto-generated
+    # from this by SqlDialectGenerator. Required for sql-type problems unless
+    # raw SQL overrides are provided.
+    seed_data_json: Optional[Dict] = None
+
+    # ── Raw SQL overrides (escape hatch / dropdown) ────────────────────────────
+    # Use only when the JSON descriptor cannot express what you need
+    # (e.g. composite PKs, FK constraints, DEFAULT NOW(), check constraints).
+    # When provided, these take precedence over the auto-generated SQL.
     schema_sql: Optional[str] = None
     seed_sql: Optional[str] = None
+    mysql_schema_sql: Optional[str] = None
+    mysql_seed_sql: Optional[str] = None
+
     column_types: Dict[str, str] = {}
-    seed_data_json: Optional[Dict] = None
+
 
 class SolutionCreate(BaseModel):
     reference_query: Optional[str] = None
+    mysql_reference_query: Optional[str] = None  # optional MySQL override; NULL = use reference_query for both
     reference_code: Optional[str] = None
     function_name: Optional[str] = None  # DSA only: e.g. "twoSum", "maxSubArray"
     starter_code: Optional[str] = None   # DSA only: full function stub shown to users, e.g. "def twoSum(nums: List[int], target: int) -> List[int]:"
