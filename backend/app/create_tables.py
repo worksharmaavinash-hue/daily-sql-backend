@@ -101,6 +101,10 @@ async def init_db():
                     PRIMARY KEY (user_id, comment_id)
                 );
 
+                -- MYSQL DIALECT SUPPORT
+                ALTER TABLE core.problem_datasets ADD COLUMN IF NOT EXISTS mysql_schema_sql TEXT;
+                ALTER TABLE core.problem_datasets ADD COLUMN IF NOT EXISTS mysql_seed_sql TEXT;
+                ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS mysql_reference_query TEXT;
 
             """)
             print("Migrations applied successfully.")

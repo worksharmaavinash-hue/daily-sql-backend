@@ -12,7 +12,8 @@ from app.admin.schemas import (
     WhitelistCreate,
     WhitelistBulkCreate
 )
-from app.execution.schema_manager import generate_schema_name, teardown_execution_schema
+from app.execution.sql_dialect_generator import SqlDialectGenerator
+
 from app.auth.jwt import _decode_token
 import json
 import os
@@ -32,6 +33,23 @@ def json_serial(obj):
     if isinstance(obj, PyUUID):
         return str(obj)
     raise TypeError(f"Type {type(obj)} not serializable")
+
+
+_sql_generator = SqlDialectGenerator()
+
+def _get_supported_dialects(datasets) -> list:
+    """
+    Returns the list of SQL dialects supported by a problem.
+    A problem supports MySQL if any of its datasets has mysql_schema_sql defined.
+    """
+    dialects = ["postgresql"]
+    for d in datasets:
+        if d.get("mysql_schema_sql") and d["mysql_schema_sql"].strip():
+            dialects.append("mysql")
+            break
+    return dialects
+
+
 
 API_KEY_NAME = "X-Admin-Secret"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
@@ -126,11 +144,11 @@ async def get_problem_details(problem_id: str):
             raise HTTPException(status_code=404, detail="Problem not found")
         
         datasets = await conn.fetch(
-            "SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json FROM core.problem_datasets WHERE problem_id = $1",
+            "SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json, mysql_schema_sql, mysql_seed_sql FROM core.problem_datasets WHERE problem_id = $1",
             problem_id
         )
         solution = await conn.fetchrow(
-            "SELECT reference_query, reference_code, reference_output, order_sensitive, notes FROM core.problem_solutions WHERE problem_id = $1",
+            "SELECT reference_query, mysql_reference_query, reference_code, reference_output, order_sensitive, notes FROM core.problem_solutions WHERE problem_id = $1",
             problem_id
         )
     
@@ -148,6 +166,8 @@ async def get_problem_details(problem_id: str):
                 "table_name": d["table_name"],
                 "schema_sql": d["schema_sql"],
                 "seed_sql": d["seed_sql"],
+                "mysql_schema_sql": d["mysql_schema_sql"],
+                "mysql_seed_sql": d["mysql_seed_sql"],
                 "sample_rows": json.loads(d["sample_rows"]) if isinstance(d["sample_rows"], str) else d["sample_rows"],
                 "column_types": json.loads(d["column_types"]) if isinstance(d["column_types"], str) else d["column_types"],
                 "seed_data_json": json.loads(d["seed_data_json"]) if isinstance(d["seed_data_json"], str) else d["seed_data_json"],
@@ -156,11 +176,14 @@ async def get_problem_details(problem_id: str):
         ],
         "solution": {
             "reference_query": solution["reference_query"],
+            "mysql_reference_query": solution["mysql_reference_query"],
             "reference_code": solution["reference_code"],
-            "reference_output": json.loads(solution["reference_output"]) if isinstance(solution["reference_output"], str) else solution["reference_output"],
+            "reference_output": json.loads(solution["reference_output"]) if isinstance(solution["reference_output"], str) else solution["reference_output"] if solution["reference_output"] else None,
             "order_sensitive": solution["order_sensitive"],
             "notes": solution["notes"]
-        } if solution else None
+        } if solution else None,
+        # supported_dialects: ['postgresql', 'mysql'] if any dataset has mysql_schema_sql
+        "supported_dialects": _get_supported_dialects(datasets),
     }
 
 
@@ -296,54 +319,127 @@ async def add_dataset(problem_id: str, payload: DatasetCreate):
         if not challenge_type:
             raise HTTPException(status_code=404, detail="Problem not found")
 
-        schema_sql = payload.schema_sql or ""
-        seed_sql = payload.seed_sql or ""
         seed_data_json_str = None
 
         if challenge_type == 'sql':
-            # Live Postgres validation for SQL challenges
-            schema_name = generate_schema_name()
-            try:
-                await conn.execute(f'CREATE SCHEMA "{schema_name}"')
-                await conn.execute(f'SET search_path TO "{schema_name}"')
-                
-                # Execute schemas and seed
-                await conn.execute(schema_sql)
-                await conn.execute(seed_sql)
-                
-                # Fetch sample rows
-                records = await conn.fetch(f"SELECT * FROM {payload.table_name} LIMIT 10")
-                sample_rows = [dict(record) for record in records]
-            finally:
-                await teardown_execution_schema(conn, schema_name)
-                await conn.execute('SET search_path TO public')
+            # ── Resolve SQL for every supported dialect ───────────────────────
+            # Priority: raw SQL override (dropdown) > auto-generated from JSON descriptor
+            if not payload.seed_data_json and not payload.schema_sql:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Either seed_data_json (recommended) or schema_sql must be provided for sql challenges.",
+                )
+
+            from app.admin.dialect_validator import DIALECT_VALIDATORS
+
+            # Build a per-dialect (schema_sql, seed_sql) mapping
+            # using SqlDialectGenerator if no raw override is provided.
+            supported_dialects = _sql_generator.supported_dialects()
+
+            # Raw SQL overrides keyed by dialect (from the escape-hatch dropdown)
+            raw_overrides: dict[str, tuple[str, str]] = {}
+            if payload.schema_sql:
+                raw_overrides["postgresql"] = (
+                    payload.schema_sql,
+                    payload.seed_sql or "",
+                )
+            if payload.mysql_schema_sql:
+                raw_overrides["mysql"] = (
+                    payload.mysql_schema_sql,
+                    payload.mysql_seed_sql or "",
+                )
+
+            # Generate SQL for dialects that don't have a raw override
+            generated: dict[str, tuple[str, str]] = {}
+            if payload.seed_data_json and _sql_generator.has_schema_metadata(payload.seed_data_json):
+                for dialect in supported_dialects:
+                    if dialect not in raw_overrides:
+                        schema_sql_gen, seed_sql_gen = _sql_generator.generate(
+                            payload.seed_data_json, payload.table_name, dialect
+                        )
+                        generated[dialect] = (schema_sql_gen, seed_sql_gen)
+
+            # Final resolved SQL per dialect
+            dialect_sql: dict[str, tuple[str, str]] = {**generated, **raw_overrides}
+
+            if "postgresql" not in dialect_sql:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not resolve PostgreSQL SQL. Provide seed_data_json with schema metadata or schema_sql.",
+                )
+
+            # ── Fetch existing datasets for FK / dependency resolution ────────
+            existing_datasets = await conn.fetch(
+                """
+                SELECT table_name, schema_sql, seed_sql, mysql_schema_sql, mysql_seed_sql
+                FROM core.problem_datasets
+                WHERE problem_id = $1
+                """,
+                problem_id
+            )
+
+            # ── Validate each dialect against its live DB ─────────────────────
+            sample_rows: list[dict] = []
+            for dialect, (d_schema_sql, d_seed_sql) in dialect_sql.items():
+                validator = DIALECT_VALIDATORS.get(dialect)
+                if validator is None:
+                    continue  # No validator registered for this dialect — skip
+
+                result = await validator(
+                    conn,
+                    d_schema_sql,
+                    d_seed_sql,
+                    [dict(ds) for ds in existing_datasets],
+                    payload.table_name,
+                )
+                # PostgreSQL validator returns sample_rows; others return None
+                if dialect == "postgresql" and result:
+                    sample_rows = result
+
+            # ── Persist seed_data_json for future dialect regeneration ────────
+            if payload.seed_data_json:
+                seed_data_json_str = json.dumps(payload.seed_data_json, default=json_serial)
+
+            # Resolve final flat column values (backwards compat + execution engines)
+            pg_schema, pg_seed = dialect_sql.get("postgresql", ("", ""))
+            my_schema, my_seed = dialect_sql.get("mysql", (None, None))
+
         else:
-            # Python/PySpark datasets: Extract sample rows from seed_data_json directly
+            # ── Python / PySpark datasets: extract sample rows from seed_data_json
             if not payload.seed_data_json:
-                raise HTTPException(status_code=400, detail="seed_data_json is required for python/pyspark challenges")
-            
+                raise HTTPException(
+                    status_code=400,
+                    detail="seed_data_json is required for python/pyspark challenges",
+                )
+
             columns = [c["name"] for c in payload.seed_data_json.get("columns", [])]
             rows = payload.seed_data_json.get("rows", [])[:10]
             sample_rows = [dict(zip(columns, row)) for row in rows]
             seed_data_json_str = json.dumps(payload.seed_data_json, default=json_serial)
+            pg_schema = pg_seed = ""
+            my_schema = my_seed = None
 
         await conn.execute(
             """
             INSERT INTO core.problem_datasets
-            (id, problem_id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (id, problem_id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json, mysql_schema_sql, mysql_seed_sql)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
             dataset_id,
             problem_id,
             payload.table_name,
-            schema_sql,
-            seed_sql,
+            pg_schema,
+            pg_seed,
             json.dumps(sample_rows, default=json_serial),
             json.dumps(payload.column_types),
-            seed_data_json_str
+            seed_data_json_str,
+            my_schema or None,
+            my_seed or None,
         )
 
     return {"dataset_id": str(dataset_id)}
+
+
 
 @router.post("/problems/{problem_id}/solution")
 async def add_solution(problem_id: str, payload: SolutionCreate):
@@ -356,6 +452,8 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
         )
         if not challenge_type:
             raise HTTPException(status_code=404, detail="Problem not found")
+
+        reference_output_json = None
 
         if challenge_type == 'python_dsa':
             # DSA problems: validate reference_code + function_name, then dry-run against test cases
@@ -452,7 +550,8 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
                 """
                 UPDATE core.problem_solutions
                 SET reference_query = $2, reference_code = $3, reference_output = $4,
-                    order_sensitive = $5, notes = $6, function_name = $7, starter_code = $8
+                    order_sensitive = $5, notes = $6, function_name = $7, starter_code = $8,
+                    mysql_reference_query = $9
                 WHERE problem_id = $1
                 """,
                 problem_id,
@@ -463,13 +562,14 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
                 payload.notes,
                 payload.function_name,
                 payload.starter_code,
+                payload.mysql_reference_query,
             )
         else:
             await conn.execute(
                 """
                 INSERT INTO core.problem_solutions
-                (problem_id, reference_query, reference_code, reference_output, order_sensitive, notes, function_name, starter_code)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                (problem_id, reference_query, reference_code, reference_output, order_sensitive, notes, function_name, starter_code, mysql_reference_query)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 """,
                 problem_id,
                 payload.reference_query,
@@ -479,6 +579,7 @@ async def add_solution(problem_id: str, payload: SolutionCreate):
                 payload.notes,
                 payload.function_name,
                 payload.starter_code,
+                payload.mysql_reference_query,
             )
 
     return {"status": "solution_saved"}

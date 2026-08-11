@@ -11,9 +11,15 @@ services:
     env_file: .env
     ports:
       - "8000:8000"
+    environment:
+      MYSQL_HOST: dailysql-mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-mysql}
     depends_on:
       - dailysql-postgres
       - dailysql-redis
+      - dailysql-mysql
       - python-runner
       - pyspark-runner
     networks:
@@ -39,6 +45,20 @@ services:
     image: redis:7-alpine
     container_name: dailysql_redis_prod
     restart: always
+    networks:
+      - dailysql-network
+
+  # MySQL (for dual-dialect SQL execution)
+  dailysql-mysql:
+    image: mysql:8.0
+    container_name: dailysql_mysql_prod
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-mysql}
+      MYSQL_DATABASE: dailysql_meta
+    volumes:
+      - mysql_data_prod:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password
     networks:
       - dailysql-network
 
@@ -91,6 +111,7 @@ services:
 
 volumes:
   postgres_data_prod:
+  mysql_data_prod:
   caddy_data:
   caddy_config:
 

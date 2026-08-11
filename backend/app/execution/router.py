@@ -10,6 +10,7 @@ from app.execution.schema_manager import (
 )
 from app.execution.problem_guard import ensure_problem_exists
 from app.execution.runner import execute_user_query, QueryExecutionError
+from app.execution.engines.mysql_engine import MySQLEngine
 from app.execution.judge import compare_results, compare_dsa_results
 from app.attempts.service import record_attempt
 from app.streaks.service import update_streak
@@ -23,7 +24,8 @@ router = APIRouter(prefix="/execute", tags=["execution"])
 class ExecuteRequest(BaseModel):
     problem_id: str
     query: str
-    mode: str = "submit"  # "run" | "submit" — only meaningful for python_dsa
+    mode: str = "submit"       # "run" | "submit" — only meaningful for python_dsa
+    sql_dialect: str = "postgresql"  # "postgresql" | "mysql" — only meaningful for sql
 
 
 @router.post("")
@@ -80,31 +82,86 @@ async def execute_query(
             # ==========================================
 
             if challenge_type == 'sql':
-                # ── SQL Flow ─────────────────────────────────────────────────
-                schema_name = await setup_execution_schema(conn, payload.problem_id)
-                await apply_execution_limits(conn)
-                user_result = await execute_user_query(conn, payload.query)
+                # ── SQL Flow (PostgreSQL or MySQL) ────────────────────────────
+                dialect = payload.sql_dialect  # 'postgresql' | 'mysql'
 
-                sol_row = await conn.fetchrow(
-                    "SELECT reference_query, order_sensitive FROM core.problem_solutions WHERE problem_id = $1", 
-                    payload.problem_id
-                )
-                
-                if not sol_row:
-                     return {
-                        "status": "error",
-                        "user": user_result,
-                        "expected": None,
-                        "error": "Configuration Error: Reference solution not found",
-                        "diff_reason": None,
-                        "test_summary": None,
-                    }
+                if dialect == 'mysql':
+                    # ── MySQL path ─────────────────────────────────────────
+                    # Verify the problem has dual-dialect support
+                    has_mysql = await conn.fetchval(
+                        """
+                        SELECT 1 FROM core.problem_datasets
+                        WHERE problem_id = $1 AND mysql_schema_sql IS NOT NULL
+                        LIMIT 1
+                        """,
+                        payload.problem_id
+                    )
+                    if not has_mysql:
+                        return {
+                            "status": "error",
+                            "user": None,
+                            "expected": None,
+                            "error": "This problem does not support MySQL dialect",
+                            "diff_reason": None,
+                            "test_summary": None,
+                        }
 
-                expected_result = await execute_user_query(conn, sol_row["reference_query"])
+                    mysql_engine = MySQLEngine()
+                    user_result = await mysql_engine.run(payload.query, payload.problem_id, conn)
+
+                    if user_result.get("error"):
+                        return {
+                            "status": "error",
+                            "user": None,
+                            "expected": None,
+                            "error": user_result["error"],
+                            "diff_reason": None,
+                            "test_summary": None,
+                        }
+
+                    sol_row = await conn.fetchrow(
+                        "SELECT reference_query, mysql_reference_query, order_sensitive FROM core.problem_solutions WHERE problem_id = $1",
+                        payload.problem_id
+                    )
+                    if not sol_row:
+                        return {
+                            "status": "error",
+                            "user": user_result,
+                            "expected": None,
+                            "error": "Configuration Error: Reference solution not found",
+                            "diff_reason": None,
+                            "test_summary": None,
+                        }
+
+                    # Use mysql_reference_query if set; fall back to reference_query
+                    effective_ref = sol_row["mysql_reference_query"] or sol_row["reference_query"]
+                    expected_result = await mysql_engine.run(effective_ref, payload.problem_id, conn)
+
+                else:
+                    # ── PostgreSQL path (existing, unchanged) ──────────────
+                    schema_name = await setup_execution_schema(conn, payload.problem_id)
+                    await apply_execution_limits(conn)
+                    user_result = await execute_user_query(conn, payload.query)
+
+                    sol_row = await conn.fetchrow(
+                        "SELECT reference_query, mysql_reference_query, order_sensitive FROM core.problem_solutions WHERE problem_id = $1",
+                        payload.problem_id
+                    )
+                    if not sol_row:
+                        return {
+                            "status": "error",
+                            "user": user_result,
+                            "expected": None,
+                            "error": "Configuration Error: Reference solution not found",
+                            "diff_reason": None,
+                            "test_summary": None,
+                        }
+
+                    expected_result = await execute_user_query(conn, sol_row["reference_query"])
 
                 is_correct, reason = compare_results(
-                    user_result, 
-                    expected_result, 
+                    user_result,
+                    expected_result,
                     order_sensitive=sol_row["order_sensitive"]
                 )
 
