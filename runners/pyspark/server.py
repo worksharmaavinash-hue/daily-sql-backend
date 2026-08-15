@@ -1,4 +1,5 @@
 import os
+import gc
 import json
 import traceback
 import asyncio
@@ -8,6 +9,8 @@ import pandas as pd
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+MAX_RESULT_ROWS = 1000
+
 app = FastAPI(title="DailySQL PySpark Runner Service")
 
 class ExecuteRequest(BaseModel):
@@ -16,6 +19,8 @@ class ExecuteRequest(BaseModel):
 
 def _create_spark():
     """Create a new SparkSession with memory-safe settings."""
+    # In local[1] mode, executor runs inside the driver JVM — executor.memory is ignored.
+    # Only driver.memory matters for total JVM heap.
     return SparkSession.builder \
         .master("local[1]") \
         .appName("DailySQLSparkSandbox") \
@@ -23,9 +28,13 @@ def _create_spark():
         .config("spark.driver.host", "127.0.0.1") \
         .config("spark.driver.bindAddress", "127.0.0.1") \
         .config("spark.driver.memory", "512m") \
-        .config("spark.executor.memory", "512m") \
         .config("spark.sql.shuffle.partitions", "1") \
-        .config("spark.driver.extraJavaOptions", "-XX:+UseG1GC -XX:MaxMetaspaceSize=128m") \
+        .config("spark.sql.execution.arrow.pyspark.enabled", "false") \
+        .config("spark.driver.extraJavaOptions",
+                "-XX:+UseG1GC "
+                "-XX:MaxMetaspaceSize=256m "
+                "-XX:+ClassUnloadingWithConcurrentMark "
+                "-XX:MetaspaceSize=64m") \
         .getOrCreate()
 
 # Initialize warm SparkSession globally on startup
@@ -54,6 +63,28 @@ def get_spark():
         SparkSession._instantiatedSession = None
         spark = _create_spark()
         return spark
+
+def cleanup_spark(spark_session):
+    """Free JVM + Python memory after each execution."""
+    try:
+        # Drop all temp views so the JVM catalog releases references
+        for t in spark_session.catalog.listTables():
+            if t.isTemporary:
+                spark_session.catalog.dropTempView(t.name)
+    except Exception:
+        pass
+    try:
+        # Clear any cached DataFrames
+        spark_session.catalog.clearCache()
+    except Exception:
+        pass
+    try:
+        # Trigger JVM garbage collection to free heap
+        spark_session._jvm.System.gc()
+    except Exception:
+        pass
+    # Trigger Python garbage collection to release Py4J proxy references
+    gc.collect()
 
 executor = ThreadPoolExecutor(max_workers=2)
 
@@ -105,15 +136,6 @@ def run_code_in_thread(code: str, data_payload: dict):
     # Get a healthy SparkSession (auto-recovers if JVM died)
     spark_session = get_spark()
 
-    # To prevent side-effects across calls, we clear the temp views
-    # from previous runs first.
-    try:
-        for t in spark_session.catalog.listTables():
-            if t.isTemporary:
-                spark_session.catalog.dropTempView(t.name)
-    except Exception:
-        pass
-
     global_namespace = {"spark": spark_session, "__builtins__": safe_builtins_dict}
     try:
         # 1. Reconstruct DataFrames & Views
@@ -140,9 +162,10 @@ def run_code_in_thread(code: str, data_payload: dict):
         result_df = global_namespace["result"]
         # Allow either PySpark DataFrame or Pandas DataFrame
         if hasattr(result_df, "toPandas"):  # PySpark DataFrame
-            pdf_result = result_df.toPandas()
+            # Cap rows before toPandas() to prevent memory spikes
+            pdf_result = result_df.limit(MAX_RESULT_ROWS).toPandas()
         elif isinstance(result_df, pd.DataFrame):
-            pdf_result = result_df
+            pdf_result = result_df.head(MAX_RESULT_ROWS)
         else:
             return {"error": "The 'result' variable must be a Spark or Pandas DataFrame."}
             
@@ -161,6 +184,10 @@ def run_code_in_thread(code: str, data_payload: dict):
         return {
             "error": f"Runtime Error: {str(e)}\n{traceback.format_exc()}"
         }
+    finally:
+        # Always clean up JVM + Python memory after each request
+        global_namespace.clear()
+        cleanup_spark(spark_session)
 
 @app.post("/execute")
 async def execute_code(payload: ExecuteRequest):
