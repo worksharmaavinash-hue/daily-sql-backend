@@ -39,6 +39,19 @@ def get_spark():
         spark.sql("SELECT 1")
         return spark
     except Exception:
+        # Fully tear down the broken session + JVM gateway before recreating
+        try:
+            spark.stop()
+        except Exception:
+            pass
+        try:
+            from pyspark import SparkContext
+            SparkContext._gateway = None
+            SparkContext._jvm = None
+        except Exception:
+            pass
+        # Clear the singleton so builder creates a truly new session
+        SparkSession._instantiatedSession = None
         spark = _create_spark()
         return spark
 
@@ -75,13 +88,18 @@ safe_builtins_dict = {name: getattr(builtins, name) for name in SAFE_BUILTINS if
 safe_builtins_dict['__import__'] = builtins.__import__
 
 def serialize_val(val):
-    if pd.isna(val):
-        return None
-    if hasattr(val, "isoformat"):
-        return val.isoformat()
-    if hasattr(val, "to_eng_string"):
-        return float(val)
-    return val
+    try:
+        if val is None:
+            return None
+        if isinstance(val, float) and pd.isna(val):
+            return None
+        if hasattr(val, "isoformat"):
+            return val.isoformat()
+        if hasattr(val, "to_eng_string"):
+            return float(val)
+        return val
+    except (ValueError, TypeError):
+        return str(val)
 
 def run_code_in_thread(code: str, data_payload: dict):
     # Get a healthy SparkSession (auto-recovers if JVM died)
@@ -148,7 +166,7 @@ def run_code_in_thread(code: str, data_payload: dict):
 async def execute_code(payload: ExecuteRequest):
     loop = asyncio.get_running_loop()
     try:
-        # Run in thread executor with a 10 second timeout limit
+        # Run in thread executor with a 30 second timeout limit
         result = await asyncio.wait_for(
             loop.run_in_executor(executor, run_code_in_thread, payload.code, payload.data),
             timeout=30.0
@@ -157,6 +175,10 @@ async def execute_code(payload: ExecuteRequest):
     except asyncio.TimeoutError:
         return {
             "error": "Execution Timeout: Code took too long to execute (limit: 30 seconds)."
+        }
+    except Exception as e:
+        return {
+            "error": f"Internal runner error: {str(e)}\n{traceback.format_exc()}"
         }
 
 if __name__ == "__main__":
