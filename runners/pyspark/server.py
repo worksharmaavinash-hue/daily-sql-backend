@@ -14,16 +14,33 @@ class ExecuteRequest(BaseModel):
     code: str
     data: dict
 
+def _create_spark():
+    """Create a new SparkSession with memory-safe settings."""
+    return SparkSession.builder \
+        .master("local[1]") \
+        .appName("DailySQLSparkSandbox") \
+        .config("spark.ui.enabled", "false") \
+        .config("spark.driver.host", "127.0.0.1") \
+        .config("spark.driver.bindAddress", "127.0.0.1") \
+        .config("spark.driver.memory", "512m") \
+        .config("spark.executor.memory", "512m") \
+        .config("spark.sql.shuffle.partitions", "1") \
+        .config("spark.driver.extraJavaOptions", "-XX:+UseG1GC -XX:MaxMetaspaceSize=128m") \
+        .getOrCreate()
+
 # Initialize warm SparkSession globally on startup
-spark = SparkSession.builder \
-    .master("local[1]") \
-    .appName("DailySQLSparkSandbox") \
-    .config("spark.ui.enabled", "false") \
-    .config("spark.driver.host", "127.0.0.1") \
-    .config("spark.driver.bindAddress", "127.0.0.1") \
-    .config("spark.driver.memory", "512m") \
-    .config("spark.sql.shuffle.partitions", "1") \
-    .getOrCreate()
+spark = _create_spark()
+
+def get_spark():
+    """Return the live SparkSession, recreating it if the JVM has crashed."""
+    global spark
+    try:
+        # Quick health check — will throw if the JVM is unreachable
+        spark.sql("SELECT 1")
+        return spark
+    except Exception:
+        spark = _create_spark()
+        return spark
 
 executor = ThreadPoolExecutor(max_workers=2)
 
@@ -67,16 +84,19 @@ def serialize_val(val):
     return val
 
 def run_code_in_thread(code: str, data_payload: dict):
+    # Get a healthy SparkSession (auto-recovers if JVM died)
+    spark_session = get_spark()
+
     # To prevent side-effects across calls, we clear the temp views
     # from previous runs first.
     try:
-        for t in spark.catalog.listTables():
+        for t in spark_session.catalog.listTables():
             if t.isTemporary:
-                spark.catalog.dropTempView(t.name)
+                spark_session.catalog.dropTempView(t.name)
     except Exception:
         pass
 
-    global_namespace = {"spark": spark, "__builtins__": safe_builtins_dict}
+    global_namespace = {"spark": spark_session, "__builtins__": safe_builtins_dict}
     try:
         # 1. Reconstruct DataFrames & Views
         for table_name, table_data in data_payload.items():
@@ -87,7 +107,7 @@ def run_code_in_thread(code: str, data_payload: dict):
             rows = table_data["rows"]
             
             pdf = pd.DataFrame(rows, columns=cols)
-            df = spark.createDataFrame(pdf)
+            df = spark_session.createDataFrame(pdf)
             
             global_namespace[f"{table_name}_df"] = df
             global_namespace[table_name] = df
