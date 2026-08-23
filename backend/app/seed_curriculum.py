@@ -504,8 +504,14 @@ async def main():
     # 2. Insert 50 SQL Questions
     print("\n📦 Seeding 50 SQL Problems...")
     sql_qs = get_sql_questions()
+    sql_by_diff = {"easy": [], "medium": [], "advanced": []}
     for q in sql_qs:
         prob_id = str(uuid.uuid4())
+        diff_key = "advanced" if q["difficulty"] in ("hard", "advanced") else q["difficulty"]
+        if diff_key not in sql_by_diff:
+            diff_key = "easy"
+        sql_by_diff[diff_key].append(prob_id)
+
         await conn.execute("""
             INSERT INTO core.problems (id, title, difficulty, description, estimated_time_minutes, is_active, challenge_type, row_number)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -529,8 +535,14 @@ async def main():
     # 3. Insert 30 Python Questions
     print("\n📦 Seeding 30 Python Problems...")
     py_qs = get_python_questions()
+    py_by_diff = {"easy": [], "medium": [], "advanced": []}
     for q in py_qs:
         prob_id = str(uuid.uuid4())
+        diff_key = "advanced" if q["difficulty"] in ("hard", "advanced") else q["difficulty"]
+        if diff_key not in py_by_diff:
+            diff_key = "easy"
+        py_by_diff[diff_key].append(prob_id)
+
         await conn.execute("""
             INSERT INTO core.problems (id, title, difficulty, description, estimated_time_minutes, is_active, challenge_type)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -554,8 +566,14 @@ async def main():
     # 4. Insert 30 PySpark Questions
     print("\n📦 Seeding 30 PySpark Problems...")
     spark_qs = get_pyspark_questions()
+    spark_by_diff = {"easy": [], "medium": [], "advanced": []}
     for q in spark_qs:
         prob_id = str(uuid.uuid4())
+        diff_key = "advanced" if q["difficulty"] in ("hard", "advanced") else q["difficulty"]
+        if diff_key not in spark_by_diff:
+            diff_key = "easy"
+        spark_by_diff[diff_key].append(prob_id)
+
         await conn.execute("""
             INSERT INTO core.problems (id, title, difficulty, description, estimated_time_minutes, is_active, challenge_type)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -576,12 +594,53 @@ async def main():
 
     print(f"✅ Successfully seeded {len(spark_qs)} PySpark questions.")
 
+    # 5. Seed 15 Days of Daily Practice Sets (9 questions daily: 3 SQL, 3 Python, 3 PySpark)
+    print("\n📅 Seeding 15 Days of Daily Practice Schedules (Past 14 days + Today + Tomorrow)...")
+    from datetime import date, timedelta
+    today = date.today()
+    for day_offset in range(-14, 2):
+        target_date = today + timedelta(days=day_offset)
+        idx = day_offset + 14  # 0..15
+
+        easy_sql = sql_by_diff["easy"][idx % len(sql_by_diff["easy"])]
+        med_sql = sql_by_diff["medium"][idx % len(sql_by_diff["medium"])]
+        adv_sql = sql_by_diff["advanced"][idx % len(sql_by_diff["advanced"])]
+
+        easy_py = py_by_diff["easy"][idx % len(py_by_diff["easy"])]
+        med_py = py_by_diff["medium"][idx % len(py_by_diff["medium"])]
+        adv_py = py_by_diff["advanced"][idx % len(py_by_diff["advanced"])]
+
+        easy_spark = spark_by_diff["easy"][idx % len(spark_by_diff["easy"])]
+        med_spark = spark_by_diff["medium"][idx % len(spark_by_diff["medium"])]
+        adv_spark = spark_by_diff["advanced"][idx % len(spark_by_diff["advanced"])]
+
+        await conn.execute("""
+            INSERT INTO core.daily_practice (
+                date,
+                easy_problem_id, medium_problem_id, advanced_problem_id,
+                python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (date) DO UPDATE SET
+                easy_problem_id = EXCLUDED.easy_problem_id,
+                medium_problem_id = EXCLUDED.medium_problem_id,
+                advanced_problem_id = EXCLUDED.advanced_problem_id,
+                python_easy_problem_id = EXCLUDED.python_easy_problem_id,
+                python_medium_problem_id = EXCLUDED.python_medium_problem_id,
+                python_advanced_problem_id = EXCLUDED.python_advanced_problem_id,
+                pyspark_easy_problem_id = EXCLUDED.pyspark_easy_problem_id,
+                pyspark_medium_problem_id = EXCLUDED.pyspark_medium_problem_id,
+                pyspark_advanced_problem_id = EXCLUDED.pyspark_advanced_problem_id
+        """, target_date, easy_sql, med_sql, adv_sql, easy_py, med_py, adv_py, easy_spark, med_spark, adv_spark)
+
+    print(f"✅ Successfully seeded 15 days of Daily Practice (9 problems per day: 3 SQL, 3 Python, 3 PySpark).")
 
     # Verification summary
     counts = await conn.fetch("SELECT challenge_type, count(*) FROM core.problems GROUP BY challenge_type ORDER BY count DESC;")
     print("\n📊 Current Database Problems Breakdown:")
     for r in counts:
         print(f"  - {r['challenge_type'].upper()}: {r['count']} questions")
+
 
     await conn.close()
     print("\n🎉 Seeding completed successfully!")
