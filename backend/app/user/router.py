@@ -158,8 +158,22 @@ async def get_problem(
             raise HTTPException(status_code=404, detail="Problem not found")
 
         d = dict(problem)
-        row_num = d.get("row_number") or 0
+        raw_row = d.get("row_number")
         challenge_type = d.get("challenge_type", "sql")
+        if (raw_row is None or raw_row <= 0) and challenge_type == "sql":
+            count_before = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM core.problems
+                WHERE challenge_type = 'sql'
+                  AND (created_at < (SELECT created_at FROM core.problems WHERE id = $1)
+                       OR (created_at = (SELECT created_at FROM core.problems WHERE id = $1) AND id <= $1))
+                """,
+                problem_id,
+            )
+            row_num = count_before or 1
+        else:
+            row_num = raw_row or 0
+        d["row_number"] = row_num
 
         # --- Access control ---
         # Non-SQL types (python, pyspark, python_dsa) always require a paid plan
@@ -223,11 +237,19 @@ async def list_problems(
             is_paid = await has_active_subscription(conn, user["user_id"])
 
     result = []
+    sql_index = 0
     for r in rows:
         d = dict(r)
         prob_id = str(d["id"])
-        row_num = d.get("row_number") or 0
         challenge_type = d.get("challenge_type", "sql")
+
+        if challenge_type == "sql":
+            sql_index += 1
+            raw_row = d.get("row_number")
+            row_num = raw_row if (raw_row is not None and raw_row > 0) else sql_index
+        else:
+            row_num = d.get("row_number") or 0
+        d["row_number"] = row_num
 
         # is_locked: free users see problems but cannot open/execute locked ones
         is_non_sql = challenge_type != "sql"

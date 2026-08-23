@@ -57,7 +57,20 @@ async def execute_query(
                 raise HTTPException(status_code=404, detail="Problem not found")
 
             challenge_type = prob_row["challenge_type"]
-            row_num = prob_row["row_number"] or 0
+            raw_row = prob_row["row_number"]
+            if (raw_row is None or raw_row <= 0) and challenge_type == "sql":
+                count_before = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM core.problems
+                    WHERE challenge_type = 'sql'
+                      AND (created_at < (SELECT created_at FROM core.problems WHERE id = $1)
+                           OR (created_at = (SELECT created_at FROM core.problems WHERE id = $1) AND id <= $1))
+                    """,
+                    payload.problem_id,
+                )
+                row_num = count_before or 1
+            else:
+                row_num = raw_row or 0
 
             # 1.2️⃣ Subscription / access guard
             is_non_sql = challenge_type != "sql"
