@@ -3,13 +3,14 @@ import os
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import date
 from app.db import get_pool
-from app.auth.jwt import verify_jwt
+from app.auth.jwt import verify_jwt, verify_jwt_optional
 from pydantic import BaseModel
 from typing import Optional, List
 import time
 import random
 import string
 from app.user.cloudinary_utils import generate_cloudinary_signature
+from app.payments.subscription_service import has_active_subscription
 from datetime import datetime, timedelta
 try:
     from zoneinfo import ZoneInfo
@@ -17,6 +18,8 @@ try:
 except Exception:
     import pytz
     IST = pytz.timezone("Asia/Kolkata")
+
+FREE_TIER_SQL_LIMIT = 30  # Free users can access first N SQL problems only
 
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
@@ -123,19 +126,23 @@ async def get_today_practice():
     }
 
 @router.get("/problems/{problem_id}")
-async def get_problem(problem_id: str):
+async def get_problem(
+    problem_id: str,
+    user: Optional[dict] = Depends(verify_jwt_optional),
+):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
         problem = await conn.fetchrow(
             """
-            SELECT DISTINCT ON (p.id) p.id, p.title, p.difficulty, p.description,
-                   p.estimated_time_minutes, p.challenge_type,
+            SELECT DISTINCT ON (p.id)
+                   p.id, p.title, p.difficulty, p.description,
+                   p.estimated_time_minutes, p.challenge_type, p.row_number,
                    ps.function_name, ps.starter_code
             FROM core.problems p
             LEFT JOIN core.problem_solutions ps ON ps.problem_id = p.id
             WHERE p.id = $1 AND (p.is_active = true OR EXISTS (
-                SELECT 1 FROM core.daily_practice 
+                SELECT 1 FROM core.daily_practice
                 WHERE p.id IN (
                     easy_problem_id, medium_problem_id, advanced_problem_id,
                     python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
@@ -147,26 +154,50 @@ async def get_problem(problem_id: str):
             problem_id,
         )
 
-    if not problem:
-        raise HTTPException(status_code=404, detail="Problem not found")
+        if not problem:
+            raise HTTPException(status_code=404, detail="Problem not found")
 
-    return dict(problem)
+        d = dict(problem)
+        row_num = d.get("row_number") or 0
+        challenge_type = d.get("challenge_type", "sql")
+
+        # --- Access control ---
+        # Non-SQL types (python, pyspark, python_dsa) always require a paid plan
+        is_non_sql = challenge_type != "sql"
+        is_beyond_free = row_num > FREE_TIER_SQL_LIMIT
+        needs_paid = is_non_sql or is_beyond_free
+
+        if needs_paid:
+            is_paid = False
+            if user:
+                is_paid = await has_active_subscription(conn, user["user_id"])
+            if not is_paid:
+                raise HTTPException(
+                    status_code=403,
+                    detail="subscription_required",
+                )
+
+    return d
 
 @router.get("/problems")
-async def list_problems():
+async def list_problems(
+    user: Optional[dict] = Depends(verify_jwt_optional),
+):
     pool = await get_pool()
     from app.execution.sql_dialect_generator import SqlDialectGenerator
     _gen = SqlDialectGenerator()
+
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT DISTINCT ON (p.created_at, p.id) p.id, p.title, p.difficulty, p.description,
-                   p.estimated_time_minutes, p.challenge_type,
+            SELECT DISTINCT ON (p.created_at, p.id)
+                   p.id, p.title, p.difficulty, p.description,
+                   p.estimated_time_minutes, p.challenge_type, p.row_number,
                    ps.function_name, ps.starter_code
             FROM core.problems p
             LEFT JOIN core.problem_solutions ps ON ps.problem_id = p.id
             WHERE p.is_active = true OR EXISTS (
-                SELECT 1 FROM core.daily_practice 
+                SELECT 1 FROM core.daily_practice
                 WHERE p.id IN (
                     easy_problem_id, medium_problem_id, advanced_problem_id,
                     python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
@@ -177,7 +208,6 @@ async def list_problems():
             ORDER BY p.created_at ASC, p.id
             """
         )
-        # Fetch which problems have MySQL support (for supported_dialects)
         dialect_rows = await conn.fetch(
             """
             SELECT DISTINCT problem_id
@@ -185,17 +215,29 @@ async def list_problems():
             WHERE mysql_schema_sql IS NOT NULL
             """
         )
-        # Build a set of problem IDs that have at least one MySQL-supported dataset
         dual_dialect_ids = {str(r["problem_id"]) for r in dialect_rows}
+
+        # Determine if the caller has a paid plan
+        is_paid = False
+        if user:
+            is_paid = await has_active_subscription(conn, user["user_id"])
 
     result = []
     for r in rows:
         d = dict(r)
         prob_id = str(d["id"])
-        if d.get("challenge_type") == "sql" and prob_id in dual_dialect_ids:
+        row_num = d.get("row_number") or 0
+        challenge_type = d.get("challenge_type", "sql")
+
+        # is_locked: free users see problems but cannot open/execute locked ones
+        is_non_sql = challenge_type != "sql"
+        is_beyond_free = row_num > FREE_TIER_SQL_LIMIT
+        d["is_locked"] = (not is_paid) and (is_non_sql or is_beyond_free)
+
+        if challenge_type == "sql" and prob_id in dual_dialect_ids:
             d["supported_dialects"] = ["postgresql", "mysql"]
         else:
-            d["supported_dialects"] = ["postgresql"] if d.get("challenge_type") == "sql" else []
+            d["supported_dialects"] = ["postgresql"] if challenge_type == "sql" else []
         result.append(d)
     return result
 

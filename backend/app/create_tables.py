@@ -106,10 +106,132 @@ async def init_db():
                 ALTER TABLE core.problem_datasets ADD COLUMN IF NOT EXISTS mysql_seed_sql TEXT;
                 ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS mysql_reference_query TEXT;
 
+                -- SUBSCRIPTION SYSTEM
+                -- 1. Add row_number to problems for free-tier gating
+                ALTER TABLE core.problems ADD COLUMN IF NOT EXISTS row_number SERIAL;
+
+                -- 2. Add plan columns to users
+                ALTER TABLE core.users ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'free';
+                ALTER TABLE core.users ADD COLUMN IF NOT EXISTS plan_expires_at TIMESTAMP WITH TIME ZONE;
+
+                -- 3. Subscription plans catalogue
+                CREATE TABLE IF NOT EXISTS core.subscription_plans (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    price_inr NUMERIC(10,2) NOT NULL,
+                    duration_days INTEGER,
+                    features JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+
+                -- 4. Subscriptions table
+                CREATE TABLE IF NOT EXISTS core.subscriptions (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID NOT NULL REFERENCES core.users(user_id) ON DELETE CASCADE,
+                    plan_id TEXT NOT NULL REFERENCES core.subscription_plans(id),
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'active', 'expired', 'cancelled', 'failed')),
+                    cashfree_order_id TEXT UNIQUE NOT NULL,
+                    cashfree_payment_id TEXT,
+                    amount_paid NUMERIC(10,2),
+                    starts_at TIMESTAMP WITH TIME ZONE,
+                    expires_at TIMESTAMP WITH TIME ZONE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+
+                CREATE INDEX IF NOT EXISTS subscriptions_user_id_status_idx ON core.subscriptions (user_id, status);
+                CREATE INDEX IF NOT EXISTS subscriptions_cashfree_order_id_idx ON core.subscriptions (cashfree_order_id);
+
+                -- 5. Launch Trial Configuration table
+                CREATE TABLE IF NOT EXISTS core.launch_config (
+                    id SERIAL PRIMARY KEY,
+                    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                    trial_days INTEGER NOT NULL DEFAULT 30,
+                    trial_start TIMESTAMP WITH TIME ZONE,
+                    trial_end TIMESTAMP WITH TIME ZONE,
+                    new_user_trial_days INTEGER NOT NULL DEFAULT 7,
+                    coupon_grace_days INTEGER NOT NULL DEFAULT 2,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+
+                -- 6. Coupons table (bound to specific user email, single-use, lifetime access)
+                CREATE TABLE IF NOT EXISTS core.coupons (
+                    code TEXT PRIMARY KEY,
+                    email TEXT NOT NULL,
+                    user_id UUID REFERENCES core.users(user_id) ON DELETE SET NULL,
+                    plan_granted TEXT NOT NULL DEFAULT 'lifetime',
+                    is_used BOOLEAN NOT NULL DEFAULT FALSE,
+                    used_by UUID REFERENCES core.users(user_id) ON DELETE SET NULL,
+                    used_at TIMESTAMP WITH TIME ZONE,
+                    expires_at TIMESTAMP WITH TIME ZONE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS coupons_email_idx ON core.coupons (LOWER(email));
+                CREATE INDEX IF NOT EXISTS coupons_is_used_idx ON core.coupons (is_used);
+
+                -- 7. Add trial columns to users
+                ALTER TABLE core.users ADD COLUMN IF NOT EXISTS trial_expires_at TIMESTAMP WITH TIME ZONE;
+                ALTER TABLE core.users ADD COLUMN IF NOT EXISTS trial_type TEXT;
+
+                -- 8. Stale subscription and trial expiry function
+                CREATE OR REPLACE FUNCTION core.expire_stale_subscriptions()
+                RETURNS void AS $fn$
+                BEGIN
+                    UPDATE core.subscriptions
+                    SET status = 'expired', updated_at = NOW()
+                    WHERE status = 'active'
+                      AND expires_at IS NOT NULL
+                      AND expires_at < NOW();
+
+                    UPDATE core.users u
+                    SET plan = 'free', plan_expires_at = NULL
+                    WHERE plan != 'free'
+                      AND plan != 'lifetime'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM core.subscriptions s
+                          WHERE s.user_id = u.user_id
+                            AND s.status = 'active'
+                      );
+
+                    UPDATE core.users
+                    SET trial_expires_at = NULL, trial_type = NULL
+                    WHERE trial_expires_at IS NOT NULL
+                      AND trial_expires_at < NOW();
+                END;
+                $fn$ LANGUAGE plpgsql;
+
             """)
             print("Migrations applied successfully.")
+
+            # Seed subscription plans and initial launch config
+            try:
+                conn_seed = await asyncpg.connect(DATABASE_URL)
+                await conn_seed.execute("""
+                    INSERT INTO core.subscription_plans (id, name, price_inr, duration_days, features)
+                    VALUES
+                        ('monthly',  'Monthly Plan',  899.00,  30,   '["Full access to all questions", "All challenge types", "Priority support"]'::jsonb),
+                        ('yearly',   'Yearly Plan',   1499.00, 365,  '["Full access to all questions", "All challenge types", "Priority support", "Best value"]'::jsonb),
+                        ('lifetime', 'Lifetime Plan', 4999.00, NULL, '["Full access to all questions", "All challenge types", "VIP support", "All future content"]'::jsonb)
+                    ON CONFLICT (id) DO UPDATE SET
+                        price_inr = EXCLUDED.price_inr,
+                        duration_days = EXCLUDED.duration_days,
+                        features = EXCLUDED.features;
+
+                    INSERT INTO core.launch_config (id, is_active, trial_days, new_user_trial_days, coupon_grace_days)
+                    VALUES (1, FALSE, 30, 7, 2)
+                    ON CONFLICT (id) DO NOTHING;
+                """)
+                await conn_seed.close()
+                print("Subscription plans and launch config seeded.")
+            except Exception as e:
+                print(f"Warning: Seed failed: {e}")
         except Exception as e:
             print(f"Warning: Migrations skipped or failed: {e}")
+
+
         
         await conn.close()
     except Exception as e:

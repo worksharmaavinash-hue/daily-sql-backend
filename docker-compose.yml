@@ -17,7 +17,10 @@ services:
     build: ./backend
     container_name: dailysql-api-experimental
     env_file:
-      - .env
+      - path: .env
+        required: false
+      - path: .env.local
+        required: false
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/dailysql
       REDIS_URL: redis://redis:6379

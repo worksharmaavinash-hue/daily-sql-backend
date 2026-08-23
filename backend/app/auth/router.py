@@ -140,6 +140,8 @@ async def register_verify(data: RegisterVerifyRequest):
     user_id = str(uuid.uuid4())
     hashed = _hash_password(data.password)
 
+    from app.payments.subscription_service import apply_new_user_trial
+
     async with pool.acquire() as conn:
         try:
             await conn.execute(
@@ -151,6 +153,8 @@ async def register_verify(data: RegisterVerifyRequest):
                 data.email,
                 hashed,
             )
+            # If launch trial is active, automatically give new user a 7-day trial
+            await apply_new_user_trial(conn, user_id)
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
@@ -254,6 +258,7 @@ async def google_callback(code: Optional[str] = None, state: Optional[str] = Non
         return RedirectResponse(f"{FRONTEND_URL}/login?error=missing_profile")
 
     pool = await get_pool()
+    from app.payments.subscription_service import apply_new_user_trial
 
     async with pool.acquire() as conn:
         # Check if a user with this email already exists (any provider)
@@ -287,6 +292,8 @@ async def google_callback(code: Optional[str] = None, state: Optional[str] = Non
                 google_sub,
                 full_name,
             )
+            # Apply launch trial if active
+            await apply_new_user_trial(conn, user_id)
 
     jwt_token = create_access_token(user_id, email)
 

@@ -17,7 +17,10 @@ from app.streaks.service import update_streak
 from app.auth.jwt import verify_jwt, verify_jwt_optional
 from app.rate_limit.limiter import rate_limit
 from app.execution.engines import get_engine
+from app.payments.subscription_service import has_active_subscription
 from typing import Optional
+
+FREE_TIER_SQL_LIMIT = 30  # First N SQL problems accessible to free users
 
 router = APIRouter(prefix="/execute", tags=["execution"])
 
@@ -45,15 +48,30 @@ async def execute_query(
             # 1️⃣ Validate problem
             await ensure_problem_exists(conn, payload.problem_id)
 
-            # Fetch problem details to check challenge_type
+            # Fetch problem details to check challenge_type and row_number
             prob_row = await conn.fetchrow(
-                "SELECT challenge_type FROM core.problems WHERE id = $1", 
+                "SELECT challenge_type, row_number FROM core.problems WHERE id = $1",
                 payload.problem_id
             )
             if not prob_row:
                 raise HTTPException(status_code=404, detail="Problem not found")
-                
+
             challenge_type = prob_row["challenge_type"]
+            row_num = prob_row["row_number"] or 0
+
+            # 1.2️⃣ Subscription / access guard
+            is_non_sql = challenge_type != "sql"
+            is_beyond_free = row_num > FREE_TIER_SQL_LIMIT
+            needs_paid = is_non_sql or is_beyond_free
+            if needs_paid:
+                is_paid = False
+                if user:
+                    is_paid = await has_active_subscription(conn, user["user_id"])
+                if not is_paid:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="subscription_required",
+                    )
 
             # 1.1️⃣ Validate code
             try:
@@ -64,7 +82,7 @@ async def execute_query(
             # 1.5 Check User Profile (Onboarding)
             if user:
                 profile_exists = await conn.fetchval(
-                    "SELECT onboarding_completed FROM core.users WHERE user_id = $1", 
+                    "SELECT onboarding_completed FROM core.users WHERE user_id = $1",
                     user["user_id"]
                 )
                 if not profile_exists:

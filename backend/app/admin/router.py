@@ -13,14 +13,17 @@ from app.admin.schemas import (
     WhitelistBulkCreate
 )
 from app.execution.sql_dialect_generator import SqlDialectGenerator
+from pydantic import BaseModel
 
 from app.auth.jwt import _decode_token
+
 import json
 import os
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List
+from typing import List, Optional
 from uuid import UUID as PyUUID
+
 from app.admin.analytics_router import router as analytics_router
 
 
@@ -1316,4 +1319,129 @@ async def remove_from_wa_group(user_id: str):
             PyUUID(user_id)
         )
     return {"status": "removed"}
+
+
+# ============ LAUNCH TRIAL & COUPON ADMIN ENDPOINTS ============
+
+class LaunchConfigRequest(BaseModel):
+    is_active: bool
+    trial_days: int = 30
+    new_user_trial_days: int = 7
+    coupon_grace_days: int = 2
+
+
+@router.get("/launch-config")
+async def get_admin_launch_config():
+    """Get the current launch trial configuration"""
+    pool = await get_pool()
+    from app.payments.subscription_service import get_launch_config
+    async with pool.acquire() as conn:
+        return await get_launch_config(conn)
+
+
+@router.post("/launch-config")
+async def update_admin_launch_config(payload: LaunchConfigRequest):
+    """Update launch trial config and optionally toggle global trial"""
+    pool = await get_pool()
+    from app.payments.subscription_service import set_launch_config
+    async with pool.acquire() as conn:
+        return await set_launch_config(
+            conn=conn,
+            is_active=payload.is_active,
+            trial_days=payload.trial_days,
+            new_user_trial_days=payload.new_user_trial_days,
+            coupon_grace_days=payload.coupon_grace_days,
+        )
+
+
+class GenerateCouponsRequest(BaseModel):
+    emails: Optional[List[str]] = None  # If None, generates for all users registered before trial
+    days_valid: Optional[int] = None    # Defaults to trial_days + 2 days (32 days)
+
+
+@router.get("/coupons")
+async def list_admin_coupons():
+    """List all coupons with their usage status and expiry"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT c.code, c.email, c.plan_granted, c.is_used, c.used_at, c.expires_at, c.created_at,
+                   u.username, u.full_name
+            FROM core.coupons c
+            LEFT JOIN core.users u ON LOWER(u.email) = LOWER(c.email)
+            ORDER BY c.created_at DESC
+            """
+        )
+    return [
+        {
+            "code": r["code"],
+            "email": r["email"],
+            "username": r["username"],
+            "full_name": r["full_name"],
+            "plan_granted": r["plan_granted"],
+            "is_used": r["is_used"],
+            "used_at": r["used_at"].isoformat() if r["used_at"] else None,
+            "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+@router.post("/coupons/generate")
+async def generate_admin_coupons(payload: GenerateCouponsRequest):
+    """
+    Generate unique coupon codes for selected or all early users.
+    Output includes email, username, full_name, and coupon code.
+    """
+    pool = await get_pool()
+    from datetime import datetime, timezone, timedelta
+    from app.payments.subscription_service import get_launch_config, generate_coupons_for_users
+
+    async with pool.acquire() as conn:
+        # Calculate expiry date
+        cfg = await get_launch_config(conn)
+        days = payload.days_valid or (cfg.get("trial_days", 30) + cfg.get("coupon_grace_days", 2))
+        expires_at = datetime.now(timezone.utc) + timedelta(days=days)
+
+        if payload.emails and len(payload.emails) > 0:
+            # Fetch user details for specified emails
+            clean_emails = [e.lower().strip() for e in payload.emails if e.strip()]
+            user_rows = await conn.fetch(
+                """
+                SELECT user_id, email, username, full_name
+                FROM core.users
+                WHERE LOWER(email) = ANY($1)
+                """,
+                clean_emails,
+            )
+            # Create a lookup or map for provided emails
+            found_map = {r["email"].lower(): dict(r) for r in user_rows}
+            target_users = []
+            for em in clean_emails:
+                if em in found_map:
+                    target_users.append(found_map[em])
+                else:
+                    target_users.append({"user_id": None, "email": em, "username": None, "full_name": None})
+        else:
+            # All existing users who do not already have lifetime plan
+            rows = await conn.fetch(
+                """
+                SELECT user_id, email, username, full_name
+                FROM core.users
+                WHERE plan != 'lifetime'
+                ORDER BY created_at ASC
+                """
+            )
+            target_users = [dict(r) for r in rows]
+
+        generated = await generate_coupons_for_users(conn, target_users, expires_at=expires_at)
+
+    return {
+        "count": len(generated),
+        "expires_at": expires_at.isoformat(),
+        "coupons": generated,
+    }
+
 
