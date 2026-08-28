@@ -1445,3 +1445,252 @@ async def generate_admin_coupons(payload: GenerateCouponsRequest):
     }
 
 
+@router.delete("/coupons/{code}")
+async def delete_admin_coupon(code: str):
+    """Delete or revoke an unused coupon code"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "DELETE FROM core.coupons WHERE code = $1 AND is_used = false",
+            code
+        )
+        if res == "DELETE 0":
+            # Check if it was already used
+            row = await conn.fetchrow("SELECT is_used FROM core.coupons WHERE code = $1", code)
+            if row and row["is_used"]:
+                raise HTTPException(status_code=400, detail="Cannot delete a coupon that has already been redeemed.")
+            raise HTTPException(status_code=404, detail="Coupon code not found.")
+    return {"status": "deleted", "code": code}
+
+
+# ============ SUBSCRIPTION ANALYTICS & MANAGEMENT ============
+
+class GrantPlanRequest(BaseModel):
+    email: str
+    plan_id: str  # 'monthly' | 'yearly' | 'lifetime' | 'free'
+    duration_days: Optional[int] = None  # If None, defaults to standard plan duration (30/365/forever)
+
+
+@router.get("/subscriptions")
+async def list_admin_subscriptions():
+    """List all subscriptions and subscriber history"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT s.id, s.user_id, s.plan_id, s.status, s.amount_paid,
+                   s.cashfree_order_id, s.cashfree_payment_id,
+                   s.starts_at, s.expires_at, s.created_at,
+                   u.email, u.username, u.full_name, u.plan as current_user_plan,
+                   sp.name as plan_name, sp.price_inr
+            FROM core.subscriptions s
+            LEFT JOIN core.users u ON u.user_id = s.user_id
+            LEFT JOIN core.subscription_plans sp ON sp.id = s.plan_id
+            ORDER BY s.created_at DESC
+            LIMIT 500
+            """
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "user_id": str(r["user_id"]) if r["user_id"] else None,
+            "email": r["email"],
+            "username": r["username"],
+            "full_name": r["full_name"],
+            "plan_id": r["plan_id"],
+            "plan_name": r["plan_name"] or r["plan_id"].capitalize(),
+            "status": r["status"],
+            "amount_paid": float(r["amount_paid"]) if r["amount_paid"] else 0.0,
+            "cashfree_order_id": r["cashfree_order_id"],
+            "cashfree_payment_id": r["cashfree_payment_id"],
+            "current_user_plan": r["current_user_plan"],
+            "starts_at": r["starts_at"].isoformat() if r["starts_at"] else None,
+            "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "is_lifetime": r["expires_at"] is None and r["status"] == "active",
+        }
+        for r in rows
+    ]
+
+
+@router.get("/subscriptions/analytics")
+async def get_admin_subscription_analytics():
+    """
+    Comprehensive subscription and revenue analytics:
+    - Total collection / revenue
+    - Active paid subscriber count & plan distribution
+    - Trial users count
+    - Expiring subscriptions in next 7 days
+    - Coupon redemption metrics
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 1. Total revenue & count by plan
+        rev_rows = await conn.fetch(
+            """
+            SELECT plan_id, COUNT(*) as count, COALESCE(SUM(amount_paid), 0) as revenue
+            FROM core.subscriptions
+            WHERE status = 'active'
+            GROUP BY plan_id
+            """
+        )
+        total_revenue = sum(float(r["revenue"]) for r in rev_rows)
+        active_subscribers_count = sum(r["count"] for r in rev_rows)
+
+        plan_breakdown = {r["plan_id"]: {"count": r["count"], "revenue": float(r["revenue"])} for r in rev_rows}
+
+        # 2. Overall Users by current plan
+        user_plan_counts = await conn.fetch(
+            """
+            SELECT plan, COUNT(*) as count
+            FROM core.users
+            GROUP BY plan
+            """
+        )
+        user_plans = {r["plan"]: r["count"] for r in user_plan_counts}
+
+        # 3. Active Trials count
+        trials_count = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM core.users
+            WHERE trial_expires_at > NOW() AND plan = 'free'
+            """
+        )
+
+        # 4. Expiring soon in next 7 days
+        expiring_soon_count = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM core.subscriptions
+            WHERE status = 'active'
+              AND expires_at IS NOT NULL
+              AND expires_at > NOW()
+              AND expires_at <= NOW() + INTERVAL '7 days'
+            """
+        )
+
+        # 5. Coupon Metrics
+        coupon_stats = await conn.fetchrow(
+            """
+            SELECT 
+                COUNT(*) as total_coupons,
+                COUNT(*) FILTER (WHERE is_used = true) as redeemed_coupons,
+                COUNT(*) FILTER (WHERE is_used = false AND (expires_at IS NULL OR expires_at > NOW())) as active_coupons,
+                COUNT(*) FILTER (WHERE is_used = false AND expires_at <= NOW()) as expired_coupons
+            FROM core.coupons
+            """
+        )
+
+        # 6. Recent successful payments (Last 10)
+        recent_txs = await conn.fetch(
+            """
+            SELECT s.id, s.amount_paid, s.plan_id, s.cashfree_order_id, s.created_at,
+                   u.email, u.username
+            FROM core.subscriptions s
+            LEFT JOIN core.users u ON u.user_id = s.user_id
+            WHERE s.status = 'active'
+            ORDER BY s.created_at DESC
+            LIMIT 10
+            """
+        )
+
+    return {
+        "overview": {
+            "total_revenue": total_revenue,
+            "active_subscribers": active_subscribers_count,
+            "active_trials": trials_count or 0,
+            "expiring_soon": expiring_soon_count or 0,
+            "total_registered_users": sum(user_plans.values()),
+        },
+        "plan_breakdown": plan_breakdown,
+        "user_plan_distribution": user_plans,
+        "coupon_stats": {
+            "total": coupon_stats["total_coupons"] if coupon_stats else 0,
+            "redeemed": coupon_stats["redeemed_coupons"] if coupon_stats else 0,
+            "active": coupon_stats["active_coupons"] if coupon_stats else 0,
+            "expired": coupon_stats["expired_coupons"] if coupon_stats else 0,
+        },
+        "recent_transactions": [
+            {
+                "id": str(r["id"]),
+                "amount": float(r["amount_paid"]) if r["amount_paid"] else 0.0,
+                "plan_id": r["plan_id"],
+                "order_id": r["cashfree_order_id"],
+                "email": r["email"],
+                "username": r["username"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in recent_txs
+        ],
+    }
+
+
+@router.post("/subscriptions/grant")
+async def grant_user_plan(payload: GrantPlanRequest):
+    """
+    Manually grant or modify a plan for a user (useful for admin upgrades / customer support).
+    """
+    pool = await get_pool()
+    from datetime import datetime, timezone, timedelta
+    from app.payments.subscription_service import PLAN_DURATIONS
+
+    email_clean = payload.email.lower().strip()
+    plan_id = payload.plan_id.lower().strip()
+
+    if plan_id not in ("free", "monthly", "yearly", "lifetime"):
+        raise HTTPException(status_code=400, detail="Invalid plan_id. Must be 'free', 'monthly', 'yearly', or 'lifetime'.")
+
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT user_id, email, username, full_name, plan FROM core.users WHERE LOWER(email) = $1",
+            email_clean,
+        )
+        if not user:
+            raise HTTPException(status_code=404, detail=f"User with email '{email_clean}' not found.")
+
+        user_id = user["user_id"]
+        now = datetime.now(timezone.utc)
+
+        if plan_id == "free":
+            plan_expires_at = None
+        elif plan_id == "lifetime":
+            plan_expires_at = None
+        else:
+            days = payload.duration_days or PLAN_DURATIONS.get(plan_id, 30)
+            plan_expires_at = now + timedelta(days=days)
+
+        # Update user
+        await conn.execute(
+            """
+            UPDATE core.users
+            SET plan = $1, plan_expires_at = $2, trial_expires_at = NULL, trial_type = NULL
+            WHERE user_id = $3
+            """,
+            plan_id,
+            plan_expires_at,
+            user_id,
+        )
+
+        # Record in subscriptions table
+        if plan_id != "free":
+            import uuid
+            order_id = f"manual_grant_{uuid.uuid4().hex[:12]}"
+            await conn.execute(
+                """
+                INSERT INTO core.subscriptions (user_id, plan_id, status, cashfree_order_id, starts_at, expires_at, amount_paid)
+                VALUES ($1, $2, 'active', $3, NOW(), $4, 0.0)
+                """,
+                user_id,
+                plan_id,
+                order_id,
+                plan_expires_at,
+            )
+
+    return {
+        "status": "success",
+        "email": email_clean,
+        "plan_granted": plan_id,
+        "expires_at": plan_expires_at.isoformat() if plan_expires_at else None,
+    }
+
+
+
