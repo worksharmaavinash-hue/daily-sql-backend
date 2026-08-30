@@ -271,12 +271,13 @@ async def has_active_subscription(conn, user_id: str) -> bool:
     Unified access check. User gets full access if:
       1. Has active paid plan (lifetime, or valid monthly/yearly).
       2. Has an active user trial (trial_expires_at > NOW()).
-      3. Global launch trial is currently active (launch_config.trial_start <= NOW() <= launch_config.trial_end).
+      3. Global launch trial is currently active (launch_config.trial_start <= NOW() <= launch_config.trial_end),
+         AND user is an existing user (created_at <= launch_config.trial_start or trial_type == 'global_trial').
     Otherwise False (free tier access: first 30 SQL questions + daily set).
     """
     row = await conn.fetchrow(
         """
-        SELECT plan, plan_expires_at, trial_expires_at, created_at
+        SELECT plan, plan_expires_at, trial_expires_at, trial_type, created_at
         FROM core.users
         WHERE user_id = $1
         """,
@@ -294,21 +295,27 @@ async def has_active_subscription(conn, user_id: str) -> bool:
     if plan in ("monthly", "yearly") and row["plan_expires_at"] and row["plan_expires_at"] > now:
         return True
 
-    # 2. User specific trial
-    if row["trial_expires_at"] and row["trial_expires_at"] > now:
-        return True
+    # 2. User specific trial (e.g. 7-day new signup trial or specific extension)
+    if row["trial_expires_at"]:
+        if row["trial_expires_at"] > now:
+            return True
+        else:
+            # User had an explicit trial and it has expired
+            return False
 
-    # 3. Dynamic check for global launch trial window
+    # 3. Dynamic check for global launch trial window for existing early users
     cfg = await get_launch_config(conn)
     if cfg.get("is_active") and cfg.get("trial_start") and cfg.get("trial_end"):
         if cfg["trial_start"] <= now <= cfg["trial_end"]:
-            return True
+            # Existing users created during or before launch who are not marked as new_signup
+            if row.get("trial_type") != "new_signup":
+                return True
 
     return False
 
 
 async def get_user_full_access_status(conn, user_id: str) -> dict:
-    """Detailed access status for profile and UI banners."""
+    """Detailed access status for profile, trial banners, and UI countdown."""
     row = await conn.fetchrow(
         """
         SELECT plan, plan_expires_at, trial_expires_at, trial_type, email, full_name, created_at
@@ -325,7 +332,11 @@ async def get_user_full_access_status(conn, user_id: str) -> dict:
             "is_trial": False,
             "trial_type": None,
             "trial_expires_at": None,
+            "trial_days_remaining": 0,
+            "trial_hours_remaining": 0,
+            "trial_expired": False,
             "plan_expires_at": None,
+            "is_lifetime": False,
         }
 
     now = datetime.now(timezone.utc)
@@ -335,24 +346,39 @@ async def get_user_full_access_status(conn, user_id: str) -> dict:
         or (plan in ("monthly", "yearly") and row["plan_expires_at"] and row["plan_expires_at"] > now)
     )
 
-    is_user_trial = bool(row["trial_expires_at"] and row["trial_expires_at"] > now)
-
-    # Check global trial
     cfg = await get_launch_config(conn)
-    is_global_trial = bool(
+    is_global_launch_active = bool(
         cfg.get("is_active")
         and cfg.get("trial_start")
         and cfg.get("trial_end")
         and cfg["trial_start"] <= now <= cfg["trial_end"]
     )
 
-    is_trial = not is_paid and (is_user_trial or is_global_trial)
-    trial_type = row["trial_type"] or ("global_trial" if is_global_trial else None)
+    is_user_trial = bool(row["trial_expires_at"] and row["trial_expires_at"] > now)
+    is_user_trial_expired = bool(row["trial_expires_at"] and row["trial_expires_at"] <= now)
+
+    # If user is marked as global_trial or existing user before launch start
+    is_eligible_for_global = (
+        is_global_launch_active
+        and not is_user_trial_expired
+        and row.get("trial_type") != "new_signup"
+    )
+
+    is_trial = not is_paid and (is_user_trial or is_eligible_for_global)
+    trial_type = row["trial_type"] or ("global_trial" if is_eligible_for_global else None)
 
     effective_trial_expiry = row["trial_expires_at"]
-    if not effective_trial_expiry and is_global_trial:
+    if not effective_trial_expiry and is_eligible_for_global:
         effective_trial_expiry = cfg.get("trial_end")
 
+    trial_days_remaining = 0
+    trial_hours_remaining = 0
+    if is_trial and effective_trial_expiry:
+        diff = effective_trial_expiry - now
+        trial_days_remaining = max(0, diff.days + (1 if diff.seconds > 0 else 0))
+        trial_hours_remaining = max(0, int(diff.total_seconds() // 3600))
+
+    trial_expired = not is_paid and (is_user_trial_expired or (row.get("trial_type") is not None and not is_trial))
     has_access = is_paid or is_trial
 
     return {
@@ -362,6 +388,9 @@ async def get_user_full_access_status(conn, user_id: str) -> dict:
         "is_trial": is_trial,
         "trial_type": trial_type,
         "trial_expires_at": effective_trial_expiry.isoformat() if effective_trial_expiry else None,
+        "trial_days_remaining": trial_days_remaining,
+        "trial_hours_remaining": trial_hours_remaining,
+        "trial_expired": trial_expired,
         "plan_expires_at": row["plan_expires_at"].isoformat() if row["plan_expires_at"] else None,
         "is_lifetime": plan == "lifetime",
     }
