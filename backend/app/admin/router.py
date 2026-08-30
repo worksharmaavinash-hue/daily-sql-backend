@@ -1355,8 +1355,7 @@ async def update_admin_launch_config(payload: LaunchConfigRequest):
 
 
 class GenerateCouponsRequest(BaseModel):
-    emails: Optional[List[str]] = None  # If None, generates for all users registered before trial
-    days_valid: Optional[int] = None    # Defaults to trial_days + 2 days (32 days)
+    emails: Optional[List[str]] = None
 
 
 @router.get("/coupons")
@@ -1367,7 +1366,12 @@ async def list_admin_coupons():
         rows = await conn.fetch(
             """
             SELECT c.code, c.email, c.plan_granted, c.is_used, c.used_at, c.expires_at, c.created_at,
-                   u.username, u.full_name
+                   u.username, u.full_name,
+                   CASE 
+                       WHEN c.is_used = TRUE THEN 'Redeemed'
+                       WHEN c.expires_at IS NOT NULL AND c.expires_at <= NOW() THEN 'Expired'
+                       ELSE 'Active'
+                   END as status
             FROM core.coupons c
             LEFT JOIN core.users u ON LOWER(u.email) = LOWER(c.email)
             ORDER BY c.created_at DESC
@@ -1381,6 +1385,7 @@ async def list_admin_coupons():
             "full_name": r["full_name"],
             "plan_granted": r["plan_granted"],
             "is_used": r["is_used"],
+            "status": r["status"],
             "used_at": r["used_at"].isoformat() if r["used_at"] else None,
             "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
@@ -1394,8 +1399,10 @@ async def generate_admin_coupons(payload: GenerateCouponsRequest):
     """
     Generate unique coupon codes for selected or all early users.
     Output includes email, username, full_name, and coupon code.
+    Supports raw text / list of emails from WhatsApp groups or CSVs.
     """
     pool = await get_pool()
+    import re
     from datetime import datetime, timezone, timedelta
     from app.payments.subscription_service import get_launch_config, generate_coupons_for_users
 
@@ -1405,25 +1412,50 @@ async def generate_admin_coupons(payload: GenerateCouponsRequest):
         days = payload.days_valid or (cfg.get("trial_days", 30) + cfg.get("coupon_grace_days", 2))
         expires_at = datetime.now(timezone.utc) + timedelta(days=days)
 
+        clean_emails = []
         if payload.emails and len(payload.emails) > 0:
-            # Fetch user details for specified emails
-            clean_emails = [e.lower().strip() for e in payload.emails if e.strip()]
+            for item in payload.emails:
+                if isinstance(item, str):
+                    found = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', item.lower())
+                    clean_emails.extend(found)
+
+            # Deduplicate preserving order
+            seen = set()
+            deduped_emails = []
+            for em in clean_emails:
+                if em not in seen:
+                    seen.add(em)
+                    deduped_emails.append(em)
+
+            if len(deduped_emails) == 0:
+                raise HTTPException(status_code=400, detail="No valid email addresses found in input.")
+
             user_rows = await conn.fetch(
                 """
                 SELECT user_id, email, username, full_name
                 FROM core.users
                 WHERE LOWER(email) = ANY($1)
                 """,
-                clean_emails,
+                deduped_emails,
             )
-            # Create a lookup or map for provided emails
             found_map = {r["email"].lower(): dict(r) for r in user_rows}
             target_users = []
-            for em in clean_emails:
+            for em in deduped_emails:
                 if em in found_map:
-                    target_users.append(found_map[em])
+                    u = found_map[em]
+                    target_users.append({
+                        "user_id": str(u["user_id"]) if u.get("user_id") else None,
+                        "email": em,
+                        "username": u.get("username"),
+                        "full_name": u.get("full_name")
+                    })
                 else:
-                    target_users.append({"user_id": None, "email": em, "username": None, "full_name": None})
+                    target_users.append({
+                        "user_id": None,
+                        "email": em,
+                        "username": None,
+                        "full_name": None
+                    })
         else:
             # All existing users who do not already have lifetime plan
             rows = await conn.fetch(
@@ -1434,7 +1466,15 @@ async def generate_admin_coupons(payload: GenerateCouponsRequest):
                 ORDER BY created_at ASC
                 """
             )
-            target_users = [dict(r) for r in rows]
+            target_users = [
+                {
+                    "user_id": str(r["user_id"]) if r.get("user_id") else None,
+                    "email": r["email"],
+                    "username": r.get("username"),
+                    "full_name": r.get("full_name")
+                }
+                for r in rows
+            ]
 
         generated = await generate_coupons_for_users(conn, target_users, expires_at=expires_at)
 
@@ -1454,26 +1494,16 @@ async def delete_admin_coupon(code: str):
             "DELETE FROM core.coupons WHERE code = $1 AND is_used = false",
             code
         )
-        if res == "DELETE 0":
-            # Check if it was already used
-            row = await conn.fetchrow("SELECT is_used FROM core.coupons WHERE code = $1", code)
-            if row and row["is_used"]:
-                raise HTTPException(status_code=400, detail="Cannot delete a coupon that has already been redeemed.")
-            raise HTTPException(status_code=404, detail="Coupon code not found.")
-    return {"status": "deleted", "code": code}
+    if res == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Unused coupon not found or already redeemed")
+    return {"status": "success", "message": f"Coupon {code} revoked"}
 
 
-# ============ SUBSCRIPTION ANALYTICS & MANAGEMENT ============
-
-class GrantPlanRequest(BaseModel):
-    email: str
-    plan_id: str  # 'monthly' | 'yearly' | 'lifetime' | 'free'
-    duration_days: Optional[int] = None  # If None, defaults to standard plan duration (30/365/forever)
-
+# ============ SUBSCRIPTION & REVENUE ANALYTICS ============
 
 @router.get("/subscriptions")
 async def list_admin_subscriptions():
-    """List all subscriptions and subscriber history"""
+    """List all user subscriptions with detailed transaction info"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -1482,12 +1512,11 @@ async def list_admin_subscriptions():
                    s.cashfree_order_id, s.cashfree_payment_id,
                    s.starts_at, s.expires_at, s.created_at,
                    u.email, u.username, u.full_name, u.plan as current_user_plan,
-                   sp.name as plan_name, sp.price_inr
+                   p.name as plan_name
             FROM core.subscriptions s
             LEFT JOIN core.users u ON u.user_id = s.user_id
-            LEFT JOIN core.subscription_plans sp ON sp.id = s.plan_id
+            LEFT JOIN core.subscription_plans p ON p.id = s.plan_id
             ORDER BY s.created_at DESC
-            LIMIT 500
             """
         )
     return [
@@ -1519,6 +1548,7 @@ async def get_admin_subscription_analytics():
     Comprehensive subscription and revenue analytics:
     - Total collection / revenue
     - Active paid subscriber count & plan distribution
+    - Lifetime VIP breakdown (Paid vs Early Coupon vs Total)
     - Trial users count
     - Expiring subscriptions in next 7 days
     - Coupon redemption metrics
@@ -1549,7 +1579,30 @@ async def get_admin_subscription_analytics():
         )
         user_plans = {r["plan"]: r["count"] for r in user_plan_counts}
 
-        # 3. Active Trials count
+        # 3. Lifetime VIP Breakdown: Paid vs Early Coupon vs Total
+        lifetime_total_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM core.users WHERE plan = 'lifetime'"
+        ) or 0
+
+        lifetime_paid_row = await conn.fetchrow(
+            """
+            SELECT COUNT(DISTINCT user_id) as count, COALESCE(SUM(amount_paid), 0) as revenue
+            FROM core.subscriptions
+            WHERE plan_id = 'lifetime' AND status = 'active' AND amount_paid > 0
+            """
+        )
+        lifetime_paid_count = lifetime_paid_row["count"] if lifetime_paid_row else 0
+        lifetime_paid_revenue = float(lifetime_paid_row["revenue"]) if lifetime_paid_row else 0.0
+
+        lifetime_coupon_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM core.coupons WHERE is_used = TRUE"
+        ) or 0
+
+        unredeemed_coupons_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM core.coupons WHERE is_used = FALSE AND (expires_at IS NULL OR expires_at > NOW())"
+        ) or 0
+
+        # 4. Active Trials count
         trials_count = await conn.fetchval(
             """
             SELECT COUNT(*) FROM core.users
@@ -1557,7 +1610,7 @@ async def get_admin_subscription_analytics():
             """
         )
 
-        # 4. Expiring soon in next 7 days
+        # 5. Expiring soon in next 7 days
         expiring_soon_count = await conn.fetchval(
             """
             SELECT COUNT(*) FROM core.subscriptions
@@ -1568,7 +1621,7 @@ async def get_admin_subscription_analytics():
             """
         )
 
-        # 5. Coupon Metrics
+        # 6. Coupon Metrics
         coupon_stats = await conn.fetchrow(
             """
             SELECT 
@@ -1580,7 +1633,7 @@ async def get_admin_subscription_analytics():
             """
         )
 
-        # 6. Recent successful payments (Last 10)
+        # 7. Recent successful payments (Last 10)
         recent_txs = await conn.fetch(
             """
             SELECT s.id, s.amount_paid, s.plan_id, s.cashfree_order_id, s.created_at,
@@ -1600,6 +1653,13 @@ async def get_admin_subscription_analytics():
             "active_trials": trials_count or 0,
             "expiring_soon": expiring_soon_count or 0,
             "total_registered_users": sum(user_plans.values()),
+        },
+        "lifetime_metrics": {
+            "total_lifetime_members": lifetime_total_count,
+            "paid_lifetime_count": lifetime_paid_count,
+            "paid_lifetime_revenue": lifetime_paid_revenue,
+            "coupon_redeemed_count": lifetime_coupon_count,
+            "unredeemed_coupons_count": unredeemed_coupons_count,
         },
         "plan_breakdown": plan_breakdown,
         "user_plan_distribution": user_plans,
@@ -1622,6 +1682,12 @@ async def get_admin_subscription_analytics():
             for r in recent_txs
         ],
     }
+
+
+class GrantPlanRequest(BaseModel):
+    email: str
+    plan_id: str  # 'monthly' | 'yearly' | 'lifetime' | 'free'
+    duration_days: Optional[int] = None  # If None, defaults to standard plan duration (30/365/forever)
 
 
 @router.post("/subscriptions/grant")

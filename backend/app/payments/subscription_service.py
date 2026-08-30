@@ -415,17 +415,27 @@ async def generate_coupons_for_users(
     Generate unique coupon codes for a list of users/emails.
     Each coupon is strictly bound to user's email.
     """
+    import uuid as py_uuid
     results = []
+    now = datetime.now(timezone.utc)
+
     for u in users:
         email = u.get("email", "").lower().strip()
         if not email:
             continue
-        user_id = u.get("user_id")
+
+        user_id_raw = u.get("user_id")
+        user_id_val = None
+        if user_id_raw:
+            try:
+                user_id_val = py_uuid.UUID(str(user_id_raw))
+            except Exception:
+                user_id_val = None
 
         # Check if unused coupon already exists for this email
         existing = await conn.fetchrow(
             """
-            SELECT code, email, expires_at, is_used
+            SELECT code, email, expires_at, is_used, used_at, created_at
             FROM core.coupons
             WHERE LOWER(email) = $1 AND is_used = FALSE
             """,
@@ -434,28 +444,42 @@ async def generate_coupons_for_users(
         if existing:
             code = existing["code"]
             exp = existing["expires_at"]
+            is_used = existing["is_used"]
+            used_at = existing["used_at"]
+            created_at = existing["created_at"]
         else:
             code = generate_coupon_code()
             exp = expires_at
+            is_used = False
+            used_at = None
+            created_at = now
 
             await conn.execute(
                 """
-                INSERT INTO core.coupons (code, email, user_id, plan_granted, is_used, expires_at)
-                VALUES ($1, $2, $3, 'lifetime', FALSE, $4)
-                ON CONFLICT (code) DO NOTHING
+                INSERT INTO core.coupons (code, email, user_id, plan_granted, is_used, expires_at, created_at)
+                VALUES ($1, $2, $3::uuid, 'lifetime', FALSE, $4, NOW())
+                ON CONFLICT (code) DO UPDATE SET expires_at = EXCLUDED.expires_at
                 """,
                 code,
                 email,
-                user_id,
+                user_id_val,
                 exp,
             )
+
+        status = "Redeemed" if is_used else ("Expired" if (exp and exp < now) else "Active")
 
         results.append({
             "email": email,
             "username": u.get("username"),
             "full_name": u.get("full_name"),
             "coupon_code": code,
+            "code": code,
+            "plan_granted": "lifetime",
+            "is_used": is_used,
+            "status": status,
+            "used_at": used_at.isoformat() if used_at else None,
             "expires_at": exp.isoformat() if exp else None,
+            "created_at": created_at.isoformat() if created_at else now.isoformat(),
         })
 
     return results
