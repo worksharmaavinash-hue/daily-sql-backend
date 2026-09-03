@@ -264,10 +264,36 @@ async def list_problems(
     return result
 
 @router.get("/problems/{problem_id}/datasets")
-async def get_problem_datasets(problem_id: str):
+async def get_problem_datasets(problem_id: str, user: Optional[dict] = Depends(verify_jwt_optional)):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
+        # Subscription guard: check if this is a locked problem
+        prob_row = await conn.fetchrow(
+            "SELECT challenge_type, row_number FROM core.problems WHERE id = $1",
+            problem_id,
+        )
+        if prob_row:
+            challenge_type = prob_row["challenge_type"]
+            raw_row = prob_row["row_number"]
+            if (raw_row is None or raw_row <= 0) and challenge_type == "sql":
+                count_before = await conn.fetchval(
+                    "SELECT COUNT(*) FROM core.problems WHERE challenge_type = 'sql' AND (created_at < (SELECT created_at FROM core.problems WHERE id = $1) OR (created_at = (SELECT created_at FROM core.problems WHERE id = $1) AND id <= $1))",
+                    problem_id,
+                )
+                row_num = count_before or 1
+            else:
+                row_num = raw_row or 0
+            is_non_sql = challenge_type != "sql"
+            is_beyond_free = row_num > FREE_TIER_SQL_LIMIT
+            needs_paid = is_non_sql or is_beyond_free
+            if needs_paid:
+                is_paid = False
+                if user:
+                    is_paid = await has_active_subscription(conn, user["user_id"])
+                if not is_paid:
+                    raise HTTPException(status_code=403, detail="subscription_required")
+
         rows = await conn.fetch(
             """
             SELECT id, table_name, schema_sql, seed_sql, sample_rows, column_types, seed_data_json, mysql_schema_sql, mysql_seed_sql
@@ -296,27 +322,48 @@ async def get_problem_datasets(problem_id: str):
     ]
 
 @router.get("/problems/{problem_id}/expected")
-async def get_expected_output(problem_id: str):
-    """Run the reference query and return the expected output columns + rows, or retrieve cached output for Python/PySpark."""
+async def get_expected_output(problem_id: str, user: Optional[dict] = Depends(verify_jwt_optional)):
+    """Run the reference query and return the expected output columns + rows, or retrieve cached output for Python/PySpark. Requires subscription for paid problems."""
     from app.execution.schema_manager import setup_execution_schema, teardown_execution_schema
     from app.execution.runner import execute_user_query, QueryExecutionError
 
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        # Get the problem challenge_type
+        # Get the problem challenge_type and row_number
         prob = await conn.fetchrow(
-            "SELECT challenge_type FROM core.problems WHERE id = $1",
+            "SELECT challenge_type, row_number FROM core.problems WHERE id = $1",
             problem_id,
         )
         if not prob:
             raise HTTPException(status_code=404, detail="Problem not found")
 
-        if prob["challenge_type"] == "python_dsa":
+        # Subscription guard for paid problems (same logic as execution router)
+        challenge_type_local = prob["challenge_type"]
+        raw_row_local = prob["row_number"]
+        if (raw_row_local is None or raw_row_local <= 0) and challenge_type_local == "sql":
+            count_before = await conn.fetchval(
+                "SELECT COUNT(*) FROM core.problems WHERE challenge_type = 'sql' AND (created_at < (SELECT created_at FROM core.problems WHERE id = $1) OR (created_at = (SELECT created_at FROM core.problems WHERE id = $1) AND id <= $1))",
+                problem_id,
+            )
+            row_num_local = count_before or 1
+        else:
+            row_num_local = raw_row_local or 0
+        is_non_sql_local = challenge_type_local != "sql"
+        is_beyond_free_local = row_num_local > FREE_TIER_SQL_LIMIT
+        needs_paid_local = is_non_sql_local or is_beyond_free_local
+        if needs_paid_local:
+            is_paid = False
+            if user:
+                is_paid = await has_active_subscription(conn, user["user_id"])
+            if not is_paid:
+                raise HTTPException(status_code=403, detail="subscription_required")
+
+        if challenge_type_local == "python_dsa":
             # DSA problems don't have a tabular expected output — test cases are in problem_test_cases
             raise HTTPException(status_code=404, detail="DSA problems do not have expected output")
 
-        if prob["challenge_type"] == "sql":
+        if challenge_type_local == "sql":
             # Get the reference query
             sol_row = await conn.fetchrow(
                 "SELECT reference_query FROM core.problem_solutions WHERE problem_id = $1",

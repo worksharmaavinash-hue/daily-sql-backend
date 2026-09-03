@@ -414,6 +414,7 @@ async def generate_coupons_for_users(
     """
     Generate unique coupon codes for a list of users/emails.
     Each coupon is strictly bound to user's email.
+    If an unused coupon already exists for an email, its expiry is refreshed to expires_at.
     """
     import uuid as py_uuid
     results = []
@@ -443,10 +444,17 @@ async def generate_coupons_for_users(
         )
         if existing:
             code = existing["code"]
-            exp = existing["expires_at"]
             is_used = existing["is_used"]
             used_at = existing["used_at"]
             created_at = existing["created_at"]
+            # Refresh expiry to the new value requested by admin
+            exp = expires_at if expires_at is not None else existing["expires_at"]
+            if expires_at is not None:
+                await conn.execute(
+                    "UPDATE core.coupons SET expires_at = $1 WHERE code = $2",
+                    expires_at,
+                    code,
+                )
         else:
             code = generate_coupon_code()
             exp = expires_at

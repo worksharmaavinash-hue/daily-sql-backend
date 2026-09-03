@@ -54,15 +54,26 @@ def _get_supported_dialects(datasets) -> list:
 
 
 
+import hmac as _hmac
+
 API_KEY_NAME = "X-Admin-Secret"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
+_ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
+if not _ADMIN_SECRET:
+    import warnings
+    warnings.warn(
+        "ADMIN_SECRET environment variable is not set! Admin API is UNPROTECTED. "
+        "Set ADMIN_SECRET to a strong random value before deploying.",
+        RuntimeWarning,
+        stacklevel=1,
+    )
+
 async def get_admin_api_key(request: Request, api_key: str = Security(api_key_header)):
-    # 1. Check legacy X-Admin-Secret header
-    expected_secret = os.getenv("ADMIN_SECRET", "admin_secret")
-    if api_key and api_key == expected_secret:
+    # 1. Check legacy X-Admin-Secret header (constant-time comparison prevents timing attacks)
+    if api_key and _ADMIN_SECRET and _hmac.compare_digest(api_key, _ADMIN_SECRET):
         return api_key
-    
+
     # 2. Check for Authorization: Bearer <token>
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
@@ -1356,6 +1367,7 @@ async def update_admin_launch_config(payload: LaunchConfigRequest):
 
 class GenerateCouponsRequest(BaseModel):
     emails: Optional[List[str]] = None
+    days_valid: Optional[int] = None  # If not set, falls back to launch config trial_days + grace_days
 
 
 @router.get("/coupons")
