@@ -73,9 +73,24 @@ async def execute_query(
                 row_num = raw_row or 0
 
             # 1.2️⃣ Subscription / access guard
+            is_daily_problem = await conn.fetchval(
+                """
+                SELECT 1 FROM core.daily_practice
+                WHERE date = ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                  AND $1 IN (
+                      easy_problem_id, medium_problem_id, advanced_problem_id,
+                      python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                      pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+                      dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
+                  )
+                LIMIT 1
+                """,
+                payload.problem_id,
+            )
+
             is_non_sql = challenge_type != "sql"
             is_beyond_free = row_num > FREE_TIER_SQL_LIMIT
-            needs_paid = is_non_sql or is_beyond_free
+            needs_paid = (is_non_sql or is_beyond_free) and not is_daily_problem
             if needs_paid:
                 is_paid = False
                 if user:

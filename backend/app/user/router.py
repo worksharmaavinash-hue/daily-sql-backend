@@ -176,10 +176,26 @@ async def get_problem(
         d["row_number"] = row_num
 
         # --- Access control ---
-        # Non-SQL types (python, pyspark, python_dsa) always require a paid plan
+        # Check if the problem is in today's daily set (always free)
+        is_daily_problem = await conn.fetchval(
+            """
+            SELECT 1 FROM core.daily_practice
+            WHERE date = ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+              AND $1 IN (
+                  easy_problem_id, medium_problem_id, advanced_problem_id,
+                  python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                  pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+                  dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
+              )
+            LIMIT 1
+            """,
+            problem_id,
+        )
+
+        # Non-SQL types (python, pyspark, python_dsa) and SQL > 30 require a paid plan unless in daily set
         is_non_sql = challenge_type != "sql"
         is_beyond_free = row_num > FREE_TIER_SQL_LIMIT
-        needs_paid = is_non_sql or is_beyond_free
+        needs_paid = (is_non_sql or is_beyond_free) and not is_daily_problem
 
         if needs_paid:
             is_paid = False
@@ -284,9 +300,26 @@ async def get_problem_datasets(problem_id: str, user: Optional[dict] = Depends(v
                 row_num = count_before or 1
             else:
                 row_num = raw_row or 0
+
+            # Check if problem is in today's daily set (always free)
+            is_daily_problem = await conn.fetchval(
+                """
+                SELECT 1 FROM core.daily_practice
+                WHERE date = ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                  AND $1 IN (
+                      easy_problem_id, medium_problem_id, advanced_problem_id,
+                      python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
+                      pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+                      dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
+                  )
+                LIMIT 1
+                """,
+                problem_id,
+            )
+
             is_non_sql = challenge_type != "sql"
             is_beyond_free = row_num > FREE_TIER_SQL_LIMIT
-            needs_paid = is_non_sql or is_beyond_free
+            needs_paid = (is_non_sql or is_beyond_free) and not is_daily_problem
             if needs_paid:
                 is_paid = False
                 if user:
