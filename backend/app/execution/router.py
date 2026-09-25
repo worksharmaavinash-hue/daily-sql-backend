@@ -18,6 +18,7 @@ from app.auth.jwt import verify_jwt, verify_jwt_optional
 from app.rate_limit.limiter import rate_limit
 from app.execution.engines import get_engine
 from app.payments.subscription_service import has_active_subscription
+from app.payments.dependencies import is_free_daily_sql_problem
 from typing import Optional
 
 FREE_TIER_SQL_LIMIT = 30  # First N SQL problems accessible to free users
@@ -73,20 +74,7 @@ async def execute_query(
                 row_num = raw_row or 0
 
             # 1.2️⃣ Subscription / access guard
-            is_daily_problem = await conn.fetchval(
-                """
-                SELECT 1 FROM core.daily_practice
-                WHERE date = ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
-                  AND $1 IN (
-                      easy_problem_id, medium_problem_id, advanced_problem_id,
-                      python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-                      pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
-                      dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
-                  )
-                LIMIT 1
-                """,
-                payload.problem_id,
-            )
+            is_daily_problem = await is_free_daily_sql_problem(conn, payload.problem_id)
 
             is_non_sql = challenge_type != "sql"
             is_beyond_free = row_num > FREE_TIER_SQL_LIMIT

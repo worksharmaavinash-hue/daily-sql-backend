@@ -11,6 +11,7 @@ import random
 import string
 from app.user.cloudinary_utils import generate_cloudinary_signature
 from app.payments.subscription_service import has_active_subscription
+from app.payments.dependencies import is_free_daily_sql_problem, get_free_daily_sql_ids
 from datetime import datetime, timedelta
 try:
     from zoneinfo import ZoneInfo
@@ -177,20 +178,7 @@ async def get_problem(
 
         # --- Access control ---
         # Check if the problem is in today's daily set (always free)
-        is_daily_problem = await conn.fetchval(
-            """
-            SELECT 1 FROM core.daily_practice
-            WHERE date = ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
-              AND $1 IN (
-                  easy_problem_id, medium_problem_id, advanced_problem_id,
-                  python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-                  pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
-                  dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
-              )
-            LIMIT 1
-            """,
-            problem_id,
-        )
+        is_daily_problem = await is_free_daily_sql_problem(conn, problem_id)
 
         # Non-SQL types (python, pyspark, python_dsa) and SQL > 30 require a paid plan unless in daily set
         is_non_sql = challenge_type != "sql"
@@ -251,6 +239,7 @@ async def list_problems(
         is_paid = False
         if user:
             is_paid = await has_active_subscription(conn, user["user_id"])
+        free_daily_ids = await get_free_daily_sql_ids(conn)
 
     result = []
     sql_index = 0
@@ -270,7 +259,7 @@ async def list_problems(
         # is_locked: free users see problems but cannot open/execute locked ones
         is_non_sql = challenge_type != "sql"
         is_beyond_free = row_num > FREE_TIER_SQL_LIMIT
-        d["is_locked"] = (not is_paid) and (is_non_sql or is_beyond_free)
+        d["is_locked"] = (not is_paid) and (is_non_sql or is_beyond_free) and prob_id not in free_daily_ids
 
         if challenge_type == "sql" and prob_id in dual_dialect_ids:
             d["supported_dialects"] = ["postgresql", "mysql"]
@@ -302,20 +291,7 @@ async def get_problem_datasets(problem_id: str, user: Optional[dict] = Depends(v
                 row_num = raw_row or 0
 
             # Check if problem is in today's daily set (always free)
-            is_daily_problem = await conn.fetchval(
-                """
-                SELECT 1 FROM core.daily_practice
-                WHERE date = ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
-                  AND $1 IN (
-                      easy_problem_id, medium_problem_id, advanced_problem_id,
-                      python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-                      pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
-                      dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
-                  )
-                LIMIT 1
-                """,
-                problem_id,
-            )
+            is_daily_problem = await is_free_daily_sql_problem(conn, problem_id)
 
             is_non_sql = challenge_type != "sql"
             is_beyond_free = row_num > FREE_TIER_SQL_LIMIT
@@ -384,7 +360,7 @@ async def get_expected_output(problem_id: str, user: Optional[dict] = Depends(ve
             row_num_local = raw_row_local or 0
         is_non_sql_local = challenge_type_local != "sql"
         is_beyond_free_local = row_num_local > FREE_TIER_SQL_LIMIT
-        needs_paid_local = is_non_sql_local or is_beyond_free_local
+        needs_paid_local = (is_non_sql_local or is_beyond_free_local) and not await is_free_daily_sql_problem(conn, problem_id)
         if needs_paid_local:
             is_paid = False
             if user:
