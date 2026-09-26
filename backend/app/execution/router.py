@@ -20,6 +20,15 @@ from app.execution.engines import get_engine
 from app.payments.subscription_service import has_active_subscription
 from app.payments.dependencies import is_free_daily_sql_problem
 from typing import Optional
+import time
+from app.metrics import (
+    EXECUTION_DURATION_SECONDS,
+    SUBMISSION_TOTAL,
+    ACTIVE_EXECUTIONS,
+    CHALLENGE_ATTEMPTS,
+    PROBLEM_COMPLETIONS,
+    PAYWALL_ENCOUNTERS,
+)
 
 FREE_TIER_SQL_LIMIT = 30  # First N SQL problems accessible to free users
 
@@ -45,13 +54,15 @@ async def execute_query(
 
     async with pool.acquire() as conn:
         schema_name = None
+        engine_label = None
+        exec_start_time = None
         try:
             # 1️⃣ Validate problem
             await ensure_problem_exists(conn, payload.problem_id)
 
             # Fetch problem details to check challenge_type and row_number
             prob_row = await conn.fetchrow(
-                "SELECT challenge_type, row_number FROM core.problems WHERE id = $1",
+                "SELECT challenge_type, row_number, difficulty FROM core.problems WHERE id = $1",
                 payload.problem_id
             )
             if not prob_row:
@@ -84,6 +95,7 @@ async def execute_query(
                 if user:
                     is_paid = await has_active_subscription(conn, user["user_id"])
                 if not is_paid:
+                    PAYWALL_ENCOUNTERS.labels(feature="non_sql_track" if is_non_sql else "practice_limit").inc()
                     raise HTTPException(
                         status_code=403,
                         detail="subscription_required",
@@ -112,8 +124,11 @@ async def execute_query(
                     }
 
             # ==========================================
-            # 2️⃣ Branch by challenge type
+            # 2️⃣ Branch by challenge type & track execution
             # ==========================================
+            engine_label = payload.sql_dialect if challenge_type == 'sql' else challenge_type
+            ACTIVE_EXECUTIONS.labels(engine=engine_label).inc()
+            exec_start_time = time.perf_counter()
 
             if challenge_type == 'sql':
                 # ── SQL Flow (PostgreSQL or MySQL) ────────────────────────────
@@ -228,6 +243,15 @@ async def execute_query(
                             )
                     except Exception as e:
                         print(f"Stats recording error: {e}")
+
+                if exec_start_time and engine_label:
+                    duration = time.perf_counter() - exec_start_time
+                    EXECUTION_DURATION_SECONDS.labels(engine=engine_label).observe(duration)
+                    CHALLENGE_ATTEMPTS.labels(challenge_type=challenge_type).inc()
+                    SUBMISSION_TOTAL.labels(engine=engine_label, status="correct" if is_correct else "wrong_answer").inc()
+                    if is_correct:
+                        diff_val = prob_row.get("difficulty") if prob_row else "Medium"
+                        PROBLEM_COMPLETIONS.labels(difficulty=diff_val or "Medium", challenge_type=challenge_type).inc()
 
                 return {
                     "status": "correct" if is_correct else "incorrect",
@@ -350,6 +374,16 @@ async def execute_query(
                     except Exception as e:
                         print(f"Stats recording error: {e}")
 
+                if exec_start_time and engine_label:
+                    duration = time.perf_counter() - exec_start_time
+                    EXECUTION_DURATION_SECONDS.labels(engine=engine_label).observe(duration)
+                    CHALLENGE_ATTEMPTS.labels(challenge_type=challenge_type).inc()
+                    status_lbl = "dry_run" if is_run_mode else ("correct" if is_correct else "wrong_answer")
+                    SUBMISSION_TOTAL.labels(engine=engine_label, status=status_lbl).inc()
+                    if is_correct and not is_run_mode:
+                        diff_val = prob_row.get("difficulty") if prob_row else "Medium"
+                        PROBLEM_COMPLETIONS.labels(difficulty=diff_val or "Medium", challenge_type=challenge_type).inc()
+
                 return {
                     # "run_result" signals the frontend this was a dry-run (no badge/streak update)
                     "status": "run_result" if is_run_mode else ("correct" if is_correct else "incorrect"),
@@ -442,6 +476,15 @@ async def execute_query(
                     except Exception as e:
                         print(f"Stats recording error: {e}")
 
+                if exec_start_time and engine_label:
+                    duration = time.perf_counter() - exec_start_time
+                    EXECUTION_DURATION_SECONDS.labels(engine=engine_label).observe(duration)
+                    CHALLENGE_ATTEMPTS.labels(challenge_type=challenge_type).inc()
+                    SUBMISSION_TOTAL.labels(engine=engine_label, status="correct" if is_correct else "wrong_answer").inc()
+                    if is_correct:
+                        diff_val = prob_row.get("difficulty") if prob_row else "Medium"
+                        PROBLEM_COMPLETIONS.labels(difficulty=diff_val or "Medium", challenge_type=challenge_type).inc()
+
                 return {
                     "status": "correct" if is_correct else "incorrect",
                     "user": {
@@ -459,6 +502,12 @@ async def execute_query(
                 }
 
         except QueryExecutionError as e:
+            if exec_start_time and engine_label:
+                duration = time.perf_counter() - exec_start_time
+                EXECUTION_DURATION_SECONDS.labels(engine=engine_label).observe(duration)
+                err_status = "timeout" if "timeout" in str(e).lower() else "runtime_error"
+                SUBMISSION_TOTAL.labels(engine=engine_label, status=err_status).inc()
+
             return {
                 "status": "error",
                 "user": None,
@@ -469,10 +518,18 @@ async def execute_query(
             }
 
         except Exception as e:
+            if exec_start_time and engine_label:
+                duration = time.perf_counter() - exec_start_time
+                EXECUTION_DURATION_SECONDS.labels(engine=engine_label).observe(duration)
+                err_status = "oom" if "memory" in str(e).lower() else "runtime_error"
+                SUBMISSION_TOTAL.labels(engine=engine_label, status=err_status).inc()
+
             import traceback
             traceback.print_exc()
             raise HTTPException(status_code=400, detail=str(e))
 
         finally:
+            if engine_label:
+                ACTIVE_EXECUTIONS.labels(engine=engine_label).dec()
             if schema_name:
                 await teardown_execution_schema(conn, schema_name)

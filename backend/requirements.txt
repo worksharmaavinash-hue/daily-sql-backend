@@ -11,3 +11,4 @@ itsdangerous
 python-multipart
 requests
 pydantic[email]
+prometheus-fastapi-instrumentator

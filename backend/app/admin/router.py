@@ -70,8 +70,14 @@ if not _ADMIN_SECRET:
     )
 
 async def get_admin_api_key(request: Request, api_key: str = Security(api_key_header)):
-    # 1. Check legacy X-Admin-Secret header (constant-time comparison prevents timing attacks)
+    """
+    Validates either:
+    1. Legacy X-Admin-Secret header (constant-time comparison prevents timing attacks)
+    2. Bearer token (Staff JWT with 'writer', 'admin', or 'superadmin' role, or consumer admin token)
+    """
+    # 1. Check legacy X-Admin-Secret header
     if api_key and _ADMIN_SECRET and _hmac.compare_digest(api_key, _ADMIN_SECRET):
+        request.state.staff = {"role": "superadmin", "email": "system@admin", "staff_id": "legacy_admin"}
         return api_key
 
     # 2. Check for Authorization: Bearer <token>
@@ -80,15 +86,37 @@ async def get_admin_api_key(request: Request, api_key: str = Security(api_key_he
         token = auth_header.split(" ")[1]
         try:
             payload = _decode_token(token)
+            # Staff token
+            if payload.get("token_type") == "staff":
+                role = payload.get("role", "writer")
+                request.state.staff = {
+                    "role": role,
+                    "email": payload.get("email"),
+                    "staff_id": payload.get("sub"),
+                    "full_name": payload.get("full_name")
+                }
+                return token
+            # Legacy consumer admin token
             if payload.get("admin") is True:
+                request.state.staff = {"role": "admin", "email": payload.get("email"), "staff_id": payload.get("sub")}
                 return token
         except Exception:
             pass
 
-    raise HTTPException(status_code=403, detail="Admin access required")
+    raise HTTPException(status_code=403, detail="Staff or Admin access required")
+
+
+async def require_admin_role(request: Request, _auth = Depends(get_admin_api_key)):
+    """Strict guard for endpoints that must only be accessed by admins (not writers)."""
+    staff = getattr(request.state, "staff", {})
+    if staff.get("role") not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="Admin permissions required for this resource")
+    return staff
+
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_admin_api_key)])
-router.include_router(analytics_router)
+router.include_router(analytics_router, dependencies=[Depends(require_admin_role)])
+
 
 
 # ============ GET ENDPOINTS (For Admin UI) ============
@@ -868,7 +896,7 @@ async def admin_get_comments(problem_id: str):
 
 # ============ ADMIN FEEDBACK VIEW ============
 
-@router.get("/feedback")
+@router.get("/feedback", dependencies=[Depends(require_admin_role)])
 async def admin_get_feedback():
     """Get all user feedback for the admin panel."""
     pool = await get_pool()
@@ -908,7 +936,7 @@ async def admin_get_feedback():
 
 # ============ ADMIN WHITELIST MANAGEMENT ============
 
-@router.get("/whitelist")
+@router.get("/whitelist", dependencies=[Depends(require_admin_role)])
 async def list_whitelist():
     """List all whitelisted emails."""
     pool = await get_pool()
@@ -922,7 +950,7 @@ async def list_whitelist():
     ]
 
 
-@router.post("/whitelist")
+@router.post("/whitelist", dependencies=[Depends(require_admin_role)])
 async def add_to_whitelist(payload: WhitelistCreate):
     """Add an email to the whitelist."""
     pool = await get_pool()
@@ -937,7 +965,7 @@ async def add_to_whitelist(payload: WhitelistCreate):
     return {"status": "added"}
 
 
-@router.delete("/whitelist/{email}")
+@router.delete("/whitelist/{email}", dependencies=[Depends(require_admin_role)])
 async def remove_from_whitelist(email: str):
     """Remove an email from the whitelist."""
     pool = await get_pool()
@@ -1137,8 +1165,9 @@ async def dry_run_test_cases(problem_id: str, payload: dict):
         "total": len(results),
         "results": results,
     }
-@router.post("/whitelist/bulk")
-async def bulk_add_to_whitelist(payload: WhitelistBulkCreate):
+
+@router.post("/whitelist/bulk", dependencies=[Depends(require_admin_role)])
+async def bulk_add_whitelist(payload: WhitelistBulkCreate):
     """Bulk add emails to the whitelist."""
     pool = await get_pool()
     emails = [e.lower().strip() for e in payload.emails if e.strip()]
@@ -1156,8 +1185,8 @@ async def bulk_add_to_whitelist(payload: WhitelistBulkCreate):
 
 # ============ ADMIN WAITLIST MANAGEMENT ============
 
-@router.get("/waitlist")
-async def list_waitlist():
+@router.get("/waitlist", dependencies=[Depends(require_admin_role)])
+async def list_waitlist(status: Optional[str] = None):
     """List all waitlist entries."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1181,8 +1210,8 @@ async def list_waitlist():
     ]
 
 
-@router.post("/waitlist/{waitlist_id}/approve")
-async def approve_waitlist_entry(waitlist_id: str):
+@router.post("/waitlist/{waitlist_id}/approve", dependencies=[Depends(require_admin_role)])
+async def approve_waitlist(waitlist_id: str):
     """Approve a waitlist entry and move the email to the whitelist."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1210,8 +1239,8 @@ async def approve_waitlist_entry(waitlist_id: str):
     return {"status": "approved", "email": email}
 
 
-@router.post("/waitlist/{waitlist_id}/reject")
-async def reject_waitlist_entry(waitlist_id: str):
+@router.post("/waitlist/{waitlist_id}/reject", dependencies=[Depends(require_admin_role)])
+async def reject_waitlist(waitlist_id: str):
     """Reject a waitlist entry."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1224,8 +1253,8 @@ async def reject_waitlist_entry(waitlist_id: str):
     return {"status": "rejected"}
 
 
-@router.delete("/waitlist/{waitlist_id}", status_code=200)
-async def delete_waitlist_entry(waitlist_id: str):
+@router.delete("/waitlist/{waitlist_id}", dependencies=[Depends(require_admin_role)], status_code=200)
+async def delete_waitlist(waitlist_id: str):
     """Permanently delete a waitlist entry."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1238,8 +1267,8 @@ async def delete_waitlist_entry(waitlist_id: str):
     return {"status": "deleted"}
 
 
-@router.get("/users")
-async def list_users():
+@router.get("/users", dependencies=[Depends(require_admin_role)])
+async def list_admin_users():
     """List all registered users with detailed activity metrics for admin view"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1277,8 +1306,8 @@ async def list_users():
 
 # ============ WA GROUP CHECKLIST ============
 
-@router.get("/wa-group")
-async def list_wa_group_checklist():
+@router.get("/wa-group", dependencies=[Depends(require_admin_role)])
+async def list_wa_group_members():
     """List users with their WhatsApp group status"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1308,8 +1337,8 @@ async def list_wa_group_checklist():
     ]
 
 
-@router.post("/wa-group/{user_id}")
-async def add_to_wa_group(user_id: str):
+@router.post("/wa-group/{user_id}", dependencies=[Depends(require_admin_role)])
+async def add_wa_group_member(user_id: str):
     """Mark a user as added to the WhatsApp group"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1320,8 +1349,8 @@ async def add_to_wa_group(user_id: str):
     return {"status": "added"}
 
 
-@router.delete("/wa-group/{user_id}")
-async def remove_from_wa_group(user_id: str):
+@router.delete("/wa-group/{user_id}", dependencies=[Depends(require_admin_role)])
+async def remove_wa_group_member(user_id: str):
     """Remove a user from the WhatsApp group tracking list"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1341,7 +1370,7 @@ class LaunchConfigRequest(BaseModel):
     coupon_grace_days: int = 2
 
 
-@router.get("/launch-config")
+@router.get("/launch-config", dependencies=[Depends(require_admin_role)])
 async def get_admin_launch_config():
     """Get the current launch trial configuration"""
     pool = await get_pool()
@@ -1350,7 +1379,7 @@ async def get_admin_launch_config():
         return await get_launch_config(conn)
 
 
-@router.post("/launch-config")
+@router.post("/launch-config", dependencies=[Depends(require_admin_role)])
 async def update_admin_launch_config(payload: LaunchConfigRequest):
     """Update launch trial config and optionally toggle global trial"""
     pool = await get_pool()
@@ -1368,9 +1397,10 @@ async def update_admin_launch_config(payload: LaunchConfigRequest):
 class GenerateCouponsRequest(BaseModel):
     emails: Optional[List[str]] = None
     days_valid: Optional[int] = None  # If not set, falls back to launch config trial_days + grace_days
+    plan_granted: Optional[str] = "lifetime"
 
 
-@router.get("/coupons")
+@router.get("/coupons", dependencies=[Depends(require_admin_role)])
 async def list_admin_coupons():
     """List all coupons with their usage status and expiry"""
     pool = await get_pool()
@@ -1406,7 +1436,7 @@ async def list_admin_coupons():
     ]
 
 
-@router.post("/coupons/generate")
+@router.post("/coupons/generate", dependencies=[Depends(require_admin_role)])
 async def generate_admin_coupons(payload: GenerateCouponsRequest):
     """
     Generate unique coupon codes for selected or all early users.
@@ -1423,6 +1453,7 @@ async def generate_admin_coupons(payload: GenerateCouponsRequest):
         cfg = await get_launch_config(conn)
         days = payload.days_valid or (cfg.get("trial_days", 30) + cfg.get("coupon_grace_days", 2))
         expires_at = datetime.now(timezone.utc) + timedelta(days=days)
+
 
         clean_emails = []
         if payload.emails and len(payload.emails) > 0:
@@ -1497,7 +1528,7 @@ async def generate_admin_coupons(payload: GenerateCouponsRequest):
     }
 
 
-@router.delete("/coupons/{code}")
+@router.delete("/coupons/{code}", dependencies=[Depends(require_admin_role)])
 async def delete_admin_coupon(code: str):
     """Delete or revoke an unused coupon code"""
     pool = await get_pool()
@@ -1513,8 +1544,8 @@ async def delete_admin_coupon(code: str):
 
 # ============ SUBSCRIPTION & REVENUE ANALYTICS ============
 
-@router.get("/subscriptions")
-async def list_admin_subscriptions():
+@router.get("/subscriptions", dependencies=[Depends(require_admin_role)])
+async def list_admin_subscriptions(status: Optional[str] = None):
     """List all user subscriptions with detailed transaction info"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1554,8 +1585,8 @@ async def list_admin_subscriptions():
     ]
 
 
-@router.get("/subscriptions/analytics")
-async def get_admin_subscription_analytics():
+@router.get("/subscriptions/analytics", dependencies=[Depends(require_admin_role)])
+async def get_subscription_analytics():
     """
     Comprehensive subscription and revenue analytics:
     - Total collection / revenue
@@ -1696,14 +1727,14 @@ async def get_admin_subscription_analytics():
     }
 
 
-class GrantPlanRequest(BaseModel):
+class GrantSubscriptionRequest(BaseModel):
     email: str
     plan_id: str  # 'monthly' | 'yearly' | 'lifetime' | 'free'
     duration_days: Optional[int] = None  # If None, defaults to standard plan duration (30/365/forever)
 
 
-@router.post("/subscriptions/grant")
-async def grant_user_plan(payload: GrantPlanRequest):
+@router.post("/subscriptions/grant", dependencies=[Depends(require_admin_role)])
+async def grant_admin_subscription(payload: GrantSubscriptionRequest):
     """
     Manually grant or modify a plan for a user (useful for admin upgrades / customer support).
     """
