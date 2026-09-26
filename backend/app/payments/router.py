@@ -26,6 +26,11 @@ from app.payments.subscription_service import (
     has_active_subscription,
     verify_cashfree_webhook_signature,
 )
+from app.metrics import (
+    CHECKOUT_INITIATED,
+    PAYMENT_SUCCESS,
+    CASHFREE_WEBHOOK_STATUS,
+)
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
 
@@ -140,6 +145,7 @@ async def create_order(
 
         # Store pending subscription in DB
         await create_pending_subscription(conn, user_id, payload.plan_id, order_id)
+        CHECKOUT_INITIATED.labels(plan_id=payload.plan_id).inc()
 
     return {
         "success": True,
@@ -167,11 +173,13 @@ async def cashfree_webhook(request: Request):
     # Verify webhook signature (mandatory — never skip)
     if timestamp and signature and CASHFREE_SECRET_KEY:
         if not verify_cashfree_webhook_signature(timestamp, raw_body, signature, CASHFREE_SECRET_KEY):
+            CASHFREE_WEBHOOK_STATUS.labels(event_type="signature_verification", status="signature_error").inc()
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     try:
         body = json.loads(raw_body)
     except json.JSONDecodeError:
+        CASHFREE_WEBHOOK_STATUS.labels(event_type="json_decode", status="invalid_json").inc()
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     event_type = body.get("type", "")
@@ -188,9 +196,14 @@ async def cashfree_webhook(request: Request):
         async with pool.acquire() as conn:
             result = await activate_subscription(conn, order_id, str(cf_payment_id), amount_paid)
             if result:
+                CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type, status="success").inc()
+                PAYMENT_SUCCESS.labels(plan_id=result.get("plan_id", "unknown")).inc()
                 print(f"[Webhook] Subscription activated: user={result['user_id']} plan={result['plan_id']}")
             else:
+                CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type, status="order_not_found").inc()
                 print(f"[Webhook] No pending subscription found for order_id={order_id}")
+    else:
+        CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type or "other", status="ignored").inc()
 
     # Always return 200 to Cashfree — retry logic is on their side
     return {"status": "ok"}

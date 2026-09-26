@@ -77,21 +77,58 @@ services:
     networks:
       - runner-net
 
+  # PySpark Execution Sandbox
   pyspark-runner:
     build:
       context: ./runners/pyspark
     container_name: dailysql-pyspark-runner-experimental
     image: dailysql-pyspark-runner:latest
+    environment:
+      - JAVA_TOOL_OPTIONS=-Xmx768m
     ports:
       - "5002:5002"
     restart: always
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: 2048M
           cpus: '1.0'
     networks:
       - runner-net
+
+
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: dailysql-prometheus-experimental
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    depends_on:
+      - api
+    networks:
+      - default
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: dailysql-grafana-experimental
+    ports:
+      - "3005:3000"
+    environment:
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_DISABLE_LOGIN_FORM=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    networks:
+      - default
 
 networks:
   runner-net:
@@ -99,3 +136,4 @@ networks:
 volumes:
   dailysql_pgdata:
   dailysql_mysqldata:
+

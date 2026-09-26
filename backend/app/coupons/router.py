@@ -12,6 +12,8 @@ from app.payments.subscription_service import (
     get_user_full_access_status,
 )
 
+from app.metrics import COUPON_REDEMPTIONS
+
 router = APIRouter(prefix="/api/coupons", tags=["coupons"])
 
 
@@ -40,6 +42,7 @@ async def redeem_user_coupon(
                 user_email=user["email"],
                 code=payload.code.strip(),
             )
+            COUPON_REDEMPTIONS.labels(plan_granted=result.get("plan_id", "lifetime")).inc()
             return result
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err))
