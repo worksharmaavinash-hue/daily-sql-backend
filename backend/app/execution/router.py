@@ -18,6 +18,7 @@ from app.auth.jwt import verify_jwt, verify_jwt_optional
 from app.rate_limit.limiter import rate_limit
 from app.execution.engines import get_engine
 from app.payments.subscription_service import has_active_subscription
+from app.payments.dependencies import is_free_daily_sql_problem
 from typing import Optional
 import time
 from app.metrics import (
@@ -84,9 +85,11 @@ async def execute_query(
                 row_num = raw_row or 0
 
             # 1.2️⃣ Subscription / access guard
+            is_daily_problem = await is_free_daily_sql_problem(conn, payload.problem_id)
+
             is_non_sql = challenge_type != "sql"
             is_beyond_free = row_num > FREE_TIER_SQL_LIMIT
-            needs_paid = is_non_sql or is_beyond_free
+            needs_paid = (is_non_sql or is_beyond_free) and not is_daily_problem
             if needs_paid:
                 is_paid = False
                 if user:

@@ -12,6 +12,7 @@ from app.feedback.router import router as feedback_router
 from app.payments.router import router as payments_router
 from app.coupons.router import router as coupons_router
 import app.metrics
+from app.announcements.router import router as announcements_router
 import os
 
 
@@ -107,6 +108,7 @@ app.include_router(comments_router)
 app.include_router(feedback_router)
 app.include_router(payments_router)
 app.include_router(coupons_router)
+app.include_router(announcements_router)
 
 # Prometheus Metrics Exporter
 try:

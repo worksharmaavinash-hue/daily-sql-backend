@@ -70,13 +70,24 @@ async def check_coupon(code: str, user: dict = Depends(verify_jwt)):
         clean_email = user["email"].lower().strip()
         matches_email = row["email"].lower().strip() == clean_email
 
+        if not matches_email:
+            # Don't expose coupon metadata if it doesn't belong to this user
+            return {
+                "code": clean_code,
+                "plan_granted": None,
+                "is_used": None,
+                "expires_at": None,
+                "matches_user_email": False,
+                "is_valid": False,
+            }
+
         return {
             "code": row["code"],
             "plan_granted": row["plan_granted"],
             "is_used": row["is_used"],
             "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
-            "matches_user_email": matches_email,
-            "is_valid": not row["is_used"] and matches_email,
+            "matches_user_email": True,
+            "is_valid": not row["is_used"],
         }
 
 

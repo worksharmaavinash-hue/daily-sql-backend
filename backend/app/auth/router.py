@@ -5,7 +5,7 @@ from typing import Optional
 import asyncpg
 import httpx
 from authlib.integrations.starlette_client import OAuth
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import RedirectResponse
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from passlib.context import CryptContext
@@ -15,6 +15,7 @@ from app.auth.jwt import create_access_token, verify_admin_jwt
 from app.db import get_pool
 from app.auth.otp_handler import create_otp_session, verify_otp_session
 from app.services.mail_service import send_otp_email
+from app.rate_limit.limiter import rate_limit_auth
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -89,11 +90,14 @@ def _verify_password(plain: str, hashed: str) -> bool:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/register")
-async def register(data: RegisterRequest):
+async def register(data: RegisterRequest, request: Request):
     """
     Step 1 of Signup: Check if email exists and send OTP.
     Does NOT create the user yet.
     """
+    # Rate limit: 5 OTP requests per email per 10 minutes
+    await rate_limit_auth(f"otp:{data.email.lower()}", limit=5, window=600)
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         existing = await conn.fetchrow("SELECT user_id FROM core.users WHERE email = $1", data.email)
@@ -163,8 +167,11 @@ async def register_verify(data: RegisterVerifyRequest):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(data: LoginRequest):
+async def login(data: LoginRequest, request: Request):
     """Authenticate with email and password, return JWT."""
+    # Rate limit: 10 login attempts per email per 5 minutes
+    await rate_limit_auth(f"login:{data.email.lower()}", limit=10, window=300)
+
     pool = await get_pool()
 
     async with pool.acquire() as conn:

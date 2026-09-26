@@ -55,3 +55,36 @@ async def get_user_plan(user: dict = Depends(verify_jwt)) -> dict:
 
 # ─── Free tier problem number boundary ───────────────────────────────────────
 FREE_TIER_SQL_LIMIT = 30  # First N SQL problems (by created_at order) are free
+
+
+# ─── Free daily set ──────────────────────────────────────────────────────────
+# Free users get exactly the 3 SQL problems of today's daily set (easy / medium /
+# advanced). Python, PySpark and DSA daily problems are paid-plan only, so their
+# columns are deliberately NOT listed here.
+_TODAY_IST = "((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date"
+
+
+async def is_free_daily_sql_problem(conn, problem_id: str) -> bool:
+    """True if problem_id is one of today's three free SQL daily problems."""
+    row = await conn.fetchval(
+        f"""
+        SELECT 1 FROM core.daily_practice
+        WHERE date = {_TODAY_IST}
+          AND $1 IN (easy_problem_id, medium_problem_id, advanced_problem_id)
+        LIMIT 1
+        """,
+        problem_id,
+    )
+    return row is not None
+
+
+async def get_free_daily_sql_ids(conn) -> set:
+    """IDs (as str) of today's three free SQL daily problems."""
+    row = await conn.fetchrow(
+        f"""
+        SELECT easy_problem_id, medium_problem_id, advanced_problem_id
+        FROM core.daily_practice
+        WHERE date = {_TODAY_IST}
+        """
+    )
+    return {str(v) for v in row.values() if v is not None} if row else set()

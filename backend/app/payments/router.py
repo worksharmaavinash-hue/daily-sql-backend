@@ -170,11 +170,17 @@ async def cashfree_webhook(request: Request):
     timestamp = request.headers.get("x-webhook-timestamp", "")
     signature = request.headers.get("x-webhook-signature", "")
 
-    # Verify webhook signature (mandatory — never skip)
-    if timestamp and signature and CASHFREE_SECRET_KEY:
-        if not verify_cashfree_webhook_signature(timestamp, raw_body, signature, CASHFREE_SECRET_KEY):
-            CASHFREE_WEBHOOK_STATUS.labels(event_type="signature_verification", status="signature_error").inc()
-            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    # Signature verification is mandatory — reject requests that skip it
+    if not timestamp or not signature:
+        CASHFREE_WEBHOOK_STATUS.labels(event_type="signature_verification", status="missing_headers").inc()
+        raise HTTPException(status_code=401, detail="Missing webhook signature headers")
+
+    if not CASHFREE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Webhook secret not configured on server")
+
+    if not verify_cashfree_webhook_signature(timestamp, raw_body, signature, CASHFREE_SECRET_KEY):
+        CASHFREE_WEBHOOK_STATUS.labels(event_type="signature_verification", status="signature_error").inc()
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     try:
         body = json.loads(raw_body)
@@ -235,6 +241,14 @@ async def verify_order(order_id: str, user: dict = Depends(verify_jwt)):
 
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # SECURITY: Verify this order was created by the requesting user
+        owner_row = await conn.fetchrow(
+            "SELECT user_id FROM core.subscriptions WHERE cashfree_order_id = $1",
+            order_id,
+        )
+        if not owner_row or str(owner_row["user_id"]) != str(user["user_id"]):
+            raise HTTPException(status_code=403, detail="Order not found or does not belong to you")
+
         # If Cashfree says PAID, activate in DB (idempotent — handles webhook delay)
         if order_status == "PAID":
             # Try to find payment id from Cashfree payments list
@@ -305,15 +319,11 @@ async def cancel_subscription(
             """,
             user["user_id"],
         )
-        # Update user plan only if non-lifetime
-        await conn.execute(
-            """
-            UPDATE core.users
-            SET plan = 'free', plan_expires_at = NULL
-            WHERE user_id = $1 AND plan != 'lifetime'
-            """,
-            user["user_id"],
-        )
+        # SECURITY FIX: Only downgrade to free once the plan actually expires.
+        # Immediately reset would break the paid user's remaining period.
+        # For lifetime users, do nothing (they paid once, forever).
+        # For monthly/yearly, just mark cancelled — expiry sweep handles the rest.
+        # We do NOT reset plan here; let expire_stale_subscriptions() do it.
 
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="No active subscription to cancel")
