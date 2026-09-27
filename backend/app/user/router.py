@@ -11,7 +11,8 @@ import random
 import string
 from app.user.cloudinary_utils import generate_cloudinary_signature
 from app.payments.subscription_service import has_active_subscription
-from app.payments.dependencies import is_free_daily_sql_problem, get_free_daily_sql_ids
+from app.payments.dependencies import is_free_daily_sql_problem, get_free_daily_sql_ids, problem_needs_paid
+from app.timeutil import app_today
 from datetime import datetime, timedelta
 try:
     from zoneinfo import ZoneInfo
@@ -21,6 +22,7 @@ except Exception:
     IST = pytz.timezone("Asia/Kolkata")
 
 FREE_TIER_SQL_LIMIT = 30  # Free users can access first N SQL problems only
+LOCKED_TEASER_CHARS = 200  # how much of a locked problem's statement the public list may show
 
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
@@ -36,10 +38,10 @@ router = APIRouter(prefix="", tags=["user"])
 @router.get("/practice/today")
 async def get_today_practice():
     pool = await get_pool()
-    today = (datetime.now(IST) - timedelta(hours=1)).date()
+    today = app_today()
 
     async with pool.acquire() as conn:
-        # Cleanup & Publish Logic: 
+        # Cleanup & Publish Logic:
         # 1. Permanently publish (undraft) problems as soon as their scheduled date is reached
         await conn.execute(
             """
@@ -147,7 +149,8 @@ async def get_problem(
                 WHERE p.id IN (
                     easy_problem_id, medium_problem_id, advanced_problem_id,
                     python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+                    dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
                 )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             ))
@@ -211,15 +214,23 @@ async def list_problems(
             SELECT DISTINCT ON (p.created_at, p.id)
                    p.id, p.title, p.difficulty, p.description,
                    p.estimated_time_minutes, p.challenge_type, p.row_number,
-                   ps.function_name, ps.starter_code
+                   ps.function_name, ps.starter_code,
+                   COALESCE(att.total, 0) AS attempt_total,
+                   COALESCE(att.correct, 0) AS attempt_correct
             FROM core.problems p
             LEFT JOIN core.problem_solutions ps ON ps.problem_id = p.id
+            LEFT JOIN (
+                SELECT problem_id, COUNT(*) AS total, COUNT(*) FILTER (WHERE status = 'correct') AS correct
+                FROM core.attempts
+                GROUP BY problem_id
+            ) att ON att.problem_id = p.id
             WHERE p.is_active = true OR EXISTS (
                 SELECT 1 FROM core.daily_practice
                 WHERE p.id IN (
                     easy_problem_id, medium_problem_id, advanced_problem_id,
                     python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+                    dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
                 )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
@@ -256,10 +267,22 @@ async def list_problems(
             row_num = d.get("row_number") or 0
         d["row_number"] = row_num
 
+        # Real acceptance rate (correct / all attempts across all users); null until someone has tried it
+        attempt_total = d.pop("attempt_total", 0) or 0
+        attempt_correct = d.pop("attempt_correct", 0) or 0
+        d["attempt_count"] = attempt_total
+        d["acceptance_rate"] = round(100.0 * attempt_correct / attempt_total, 1) if attempt_total else None
+
         # is_locked: free users see problems but cannot open/execute locked ones
         is_non_sql = challenge_type != "sql"
         is_beyond_free = row_num > FREE_TIER_SQL_LIMIT
         d["is_locked"] = (not is_paid) and (is_non_sql or is_beyond_free) and prob_id not in free_daily_ids
+        if d["is_locked"]:
+            # Locked problems show only a short teaser: the full statement / starter code are paid content
+            # (GET /problems/{id} already refuses them with 403, so the list must not leak them either).
+            desc = d.get("description") or ""
+            d["description"] = (desc[:LOCKED_TEASER_CHARS].rstrip() + "…") if len(desc) > LOCKED_TEASER_CHARS else desc
+            d["starter_code"] = None
 
         if challenge_type == "sql" and prob_id in dual_dialect_ids:
             d["supported_dialects"] = ["postgresql", "mysql"]
@@ -426,18 +449,25 @@ async def get_my_streak(user=Depends(verify_jwt)):
         )
 
     if not row:
-        return {"current_streak": 0, "last_active_date": None}
+        return {"current_streak": 0, "last_active_date": None, "active_today": False}
+
+    # The stored number is only the streak while it is still alive: the user must have solved
+    # something today or yesterday. Otherwise it is broken and must read 0, not the old value.
+    today = app_today()
+    last = row["last_active_date"]
+    alive = last is not None and last >= today - timedelta(days=1)
 
     return {
-        "current_streak": row["current_streak"],
-        "last_active_date": row["last_active_date"],
+        "current_streak": row["current_streak"] if alive else 0,
+        "last_active_date": last,
+        "active_today": last == today,
     }
 
 @router.get("/me/attempts/today")
 async def get_today_attempts(user=Depends(verify_jwt)):
     pool = await get_pool()
     user_id = user["user_id"]
-    today = (datetime.now(IST) - timedelta(hours=1)).date()
+    today = app_today()
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -532,7 +562,8 @@ async def get_public_profile(username: str):
                 WHERE core.problems.id IN (
                     easy_problem_id, medium_problem_id, advanced_problem_id,
                     python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+                    dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
                 )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
@@ -735,7 +766,11 @@ async def get_my_solution(problem_id: str, user=Depends(verify_jwt)):
     return {"submitted_query": row["submitted_query"]}
 
 @router.get("/u/{username}/solutions/{problem_id}")
-async def get_public_solution(username: str, problem_id: str):
+async def get_public_solution(
+    username: str,
+    problem_id: str,
+    viewer: Optional[dict] = Depends(verify_jwt_optional),
+):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
@@ -750,6 +785,13 @@ async def get_public_solution(username: str, problem_id: str):
         # if not profile["is_public_profile"]:
         #     raise HTTPException(status_code=403, detail="This profile is private")
 
+
+        # A saved solution is paid content: the viewer needs access to that problem themselves.
+        needs_paid = await problem_needs_paid(conn, problem_id)
+        if needs_paid:
+            viewer_is_paid = bool(viewer) and await has_active_subscription(conn, viewer["user_id"])
+            if not viewer_is_paid:
+                raise HTTPException(status_code=403, detail="subscription_required")
 
         row = await conn.fetchrow(
             "SELECT submitted_query FROM core.user_solutions WHERE user_id = $1 AND problem_id = $2",
@@ -790,7 +832,8 @@ async def get_my_stats(user=Depends(verify_jwt)):
                 WHERE core.problems.id IN (
                     easy_problem_id, medium_problem_id, advanced_problem_id,
                     python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
-                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id
+                    pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
+                    dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
                 )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )

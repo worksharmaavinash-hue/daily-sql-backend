@@ -1,7 +1,9 @@
-from datetime import date, timedelta
+from datetime import timedelta
+
+from app.timeutil import app_today
 
 async def update_streak(conn, user_id: str, was_correct: bool):
-    today = date.today()
+    today = app_today()
 
     row = await conn.fetchrow(
         """

@@ -101,28 +101,5 @@ CREATE INDEX IF NOT EXISTS coupons_email_idx ON core.coupons (LOWER(email));
 CREATE INDEX IF NOT EXISTS coupons_is_used_idx ON core.coupons (is_used);
 
 -- 7. Auto-expire subscriptions and trials function
-CREATE OR REPLACE FUNCTION core.expire_stale_subscriptions()
-RETURNS void AS $$
-BEGIN
-    UPDATE core.subscriptions
-    SET status = 'expired', updated_at = NOW()
-    WHERE status = 'active'
-      AND expires_at IS NOT NULL
-      AND expires_at < NOW();
-
-    UPDATE core.users u
-    SET plan = 'free', plan_expires_at = NULL
-    WHERE plan != 'free'
-      AND plan != 'lifetime'
-      AND NOT EXISTS (
-          SELECT 1 FROM core.subscriptions s
-          WHERE s.user_id = u.user_id
-            AND s.status = 'active'
-      );
-
-    UPDATE core.users
-    SET trial_expires_at = NULL, trial_type = NULL
-    WHERE trial_expires_at IS NOT NULL
-      AND trial_expires_at < NOW();
-END;
-$$ LANGUAGE plpgsql;
+-- NOTE: superseded by backend/app/billing_hardening.sql (cancelled plans keep access until the
+-- paid period ends; trial history is kept). Run that file after this one.
