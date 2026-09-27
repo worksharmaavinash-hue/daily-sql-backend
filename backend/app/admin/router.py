@@ -346,7 +346,7 @@ async def create_problem(payload: ProblemCreate):
             payload.challenge_type,
         )
 
-    return {"problem_id": str(problem_id)}
+    return {"problem_id": str(problem_id), "id": str(problem_id)}
 
 @router.post("/problems/{problem_id}/datasets")
 async def add_dataset(problem_id: str, payload: DatasetCreate):
