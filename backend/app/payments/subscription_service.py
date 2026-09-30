@@ -112,7 +112,10 @@ async def activate_subscription(
     and revoked orders can never be re-activated by calling this again.
 
     - The plan is only applied to the user if it does not lower a plan they currently hold.
-    - Paying again for the plan you already hold extends it from its current expiry (no paid time is lost).
+    - Paid time is never discarded: buying any plan (the one you hold, or a higher one) while a paid
+      plan is still live stacks the new duration on top of its remaining time. Buying while only a
+      trial is running (no paid plan yet) stacks it on top of the trial's remaining time instead, so
+      the paid period starts after the trial would have ended rather than overwriting it.
     - A live trial is ended (its history is kept) because the user is now on a paid plan.
     - ``order_amount`` (what we asked Cashfree to charge) must match the plan's price.
 
@@ -151,7 +154,7 @@ async def activate_subscription(
             return {**_sub_summary(existing), "activated": False, "reason": "already_processed"}
 
         user = await conn.fetchrow(
-            "SELECT plan, plan_expires_at FROM core.users WHERE user_id = $1 FOR UPDATE",
+            "SELECT plan, plan_expires_at, trial_expires_at FROM core.users WHERE user_id = $1 FOR UPDATE",
             claimed["user_id"],
         )
         now = datetime.now(timezone.utc)
@@ -159,9 +162,15 @@ async def activate_subscription(
         current = _live_paid_plan(user["plan"], user["plan_expires_at"], now) if user else None
         days = PLAN_DURATIONS.get(plan_id)
 
+        # Stack, never discard: renewing the same plan or upgrading to a higher one while a paid plan
+        # is still live extends from its current expiry, not from today. Buying while only a trial is
+        # running (no paid plan yet) extends from the trial's end instead, so those days aren't wasted.
         base = now
-        if days is not None and current == plan_id and user["plan_expires_at"] is not None:
-            base = user["plan_expires_at"]          # renewal of a live plan: extend, don't discard paid time
+        if days is not None and user:
+            if current is not None and user["plan_expires_at"] is not None and user["plan_expires_at"] > now:
+                base = user["plan_expires_at"]
+            elif user["trial_expires_at"] is not None and user["trial_expires_at"] > now:
+                base = user["trial_expires_at"]
         expires_at = (base + timedelta(days=days)) if days is not None else None
 
         await conn.execute(
