@@ -118,11 +118,19 @@ async def create_order(
     async with pool.acquire() as conn:
         # Fetch user details for Cashfree
         db_user = await conn.fetchrow(
-            "SELECT full_name, email FROM core.users WHERE user_id = $1",
+            "SELECT full_name, email, whatsapp_number FROM core.users WHERE user_id = $1",
             user_id,
         )
         customer_name = (db_user["full_name"] if db_user and db_user["full_name"] else "Daily SQL User")
         customer_email = (db_user["email"] if db_user and db_user["email"] else user_email)
+
+        # Cashfree requires customer_phone on every order. Use the real number when the user gave
+        # one during onboarding (keep only the last 10 digits, so "+91 99999 99999" or "91999..."
+        # both normalise the same way); fall back to a placeholder otherwise — Cashfree's checkout
+        # lets the customer correct it inline, so this never blocks a real payment either way.
+        raw_phone = (db_user["whatsapp_number"] if db_user else None) or ""
+        digits = "".join(c for c in raw_phone if c.isdigit())
+        customer_phone = digits[-10:] if len(digits) >= 10 else "9999999999"
 
         # Trial users may buy, the same plan renews and a higher plan upgrades. Only a Lifetime holder,
         # or buying a plan lower than the one already held, is refused.
@@ -138,7 +146,7 @@ async def create_order(
             "customer_details": {
                 "customer_id": user_id,
                 "customer_email": customer_email,
-                "customer_phone": "9999999999",   # user can update later
+                "customer_phone": customer_phone,
                 "customer_name": customer_name,
             },
             "order_meta": {

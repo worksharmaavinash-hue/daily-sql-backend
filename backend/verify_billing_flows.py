@@ -72,7 +72,10 @@ class FakeResp:
 class FakeCashfree:
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
-    async def post(self, url, **kw): return FakeResp({"payment_session_id": "sess_" + uuid.uuid4().hex[:6]})
+    async def post(self, url, **kw):
+        if url.endswith("/orders"):
+            CF["last_order_payload"] = kw.get("json") or {}
+        return FakeResp({"payment_session_id": "sess_" + uuid.uuid4().hex[:6]})
     async def get(self, url, **kw):
         CF["gets"] += 1
         if url.endswith("/payments"):
@@ -192,6 +195,22 @@ async def sweep():
 
 
 # ══════════════════════════ PAYMENTS: #1 #2 #3 #9 #10 ═══════════════════════════════════════
+async def t_customer_phone():
+    print("\n[#15] Cashfree order carries the customer's real phone number when we have one")
+    uid, em = await new_user()
+    await x("UPDATE core.users SET whatsapp_number=$1 WHERE user_id=$2", "+91 98765 43210", uid)
+    await order_for(uid, em, "monthly")
+    check("a stored number is sent, normalised to its last 10 digits",
+          CF["last_order_payload"]["customer_details"]["customer_phone"] == "9876543210",
+          CF["last_order_payload"]["customer_details"]["customer_phone"])
+
+    uid, em = await new_user()  # no whatsapp_number on this one
+    await order_for(uid, em, "monthly")
+    check("no stored number -> falls back to the placeholder (Cashfree requires some value)",
+          CF["last_order_payload"]["customer_details"]["customer_phone"] == "9999999999",
+          CF["last_order_payload"]["customer_details"]["customer_phone"])
+
+
 async def t_create_order_rules():
     print("\n[#3] who may buy")
     uid, em = await new_user(trial_exp=NOW() + timedelta(days=3), trial_type="new_signup")
@@ -718,7 +737,8 @@ async def main():
     cf_reset()
     tests = [t_create_order_rules, t_activation_idempotent, t_concurrent_activation, t_cancel_keeps_access, t_refund_dispute,
              t_no_downgrade_and_amount, t_verify_hardening, t_webhook_security, t_trial_never_reopens, t_launch_toggle,
-             t_one_trial_per_mailbox, t_coupons, t_admin_grant_revoke, t_google, t_login_case, t_leaks, t_problem_progress]
+             t_one_trial_per_mailbox, t_coupons, t_admin_grant_revoke, t_google, t_login_case, t_leaks, t_problem_progress,
+             t_customer_phone]
     for t in tests:
         try:
             await t()
