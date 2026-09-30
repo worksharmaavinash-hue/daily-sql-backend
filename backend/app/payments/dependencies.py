@@ -4,6 +4,8 @@ require_subscription — FastAPI dependency for gating premium content.
 Free tier:   SQL problems 1–30 (by created_at order) + daily question set.
 Paid tiers:  Full access to all questions across all challenge types.
 """
+from typing import Optional
+
 from fastapi import Depends, HTTPException
 from app.auth.jwt import verify_jwt
 from app.db import get_pool
@@ -76,6 +78,36 @@ async def is_free_daily_sql_problem(conn, problem_id: str) -> bool:
         problem_id,
     )
     return row is not None
+
+
+async def problem_needs_paid(conn, problem_id: str) -> Optional[bool]:
+    """
+    None if the problem does not exist, otherwise whether its content needs a paid plan.
+    Same rule as /problems/{id}, /datasets, /expected and /execute: free users get SQL problems
+    1 to FREE_TIER_SQL_LIMIT and today's three SQL daily problems; everything else is paid.
+    """
+    prob = await conn.fetchrow(
+        "SELECT challenge_type, row_number FROM core.problems WHERE id = $1",
+        problem_id,
+    )
+    if not prob:
+        return None
+    challenge_type = prob["challenge_type"]
+    raw_row = prob["row_number"]
+    if (raw_row is None or raw_row <= 0) and challenge_type == "sql":
+        row_num = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM core.problems
+            WHERE challenge_type = 'sql'
+              AND (created_at < (SELECT created_at FROM core.problems WHERE id = $1)
+                   OR (created_at = (SELECT created_at FROM core.problems WHERE id = $1) AND id <= $1))
+            """,
+            problem_id,
+        ) or 1
+    else:
+        row_num = raw_row or 0
+    is_non_sql = challenge_type != "sql"
+    return (is_non_sql or row_num > FREE_TIER_SQL_LIMIT) and not await is_free_daily_sql_problem(conn, problem_id)
 
 
 async def get_free_daily_sql_ids(conn) -> set:

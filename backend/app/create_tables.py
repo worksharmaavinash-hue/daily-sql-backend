@@ -106,6 +106,10 @@ async def init_db():
                 ALTER TABLE core.problem_datasets ADD COLUMN IF NOT EXISTS mysql_seed_sql TEXT;
                 ALTER TABLE core.problem_solutions ADD COLUMN IF NOT EXISTS mysql_reference_query TEXT;
 
+                -- Indexes for the problem-list acceptance rate and the streak heat-map
+                CREATE INDEX IF NOT EXISTS attempts_problem_id_idx ON core.attempts (problem_id);
+                CREATE INDEX IF NOT EXISTS attempts_user_date_idx ON core.attempts (user_id, attempt_date);
+
                 -- SUBSCRIPTION SYSTEM
                 -- 1. Add row_number to problems for free-tier gating
                 ALTER TABLE core.problems ADD COLUMN IF NOT EXISTS row_number SERIAL;
@@ -176,32 +180,7 @@ async def init_db():
                 ALTER TABLE core.users ADD COLUMN IF NOT EXISTS trial_expires_at TIMESTAMP WITH TIME ZONE;
                 ALTER TABLE core.users ADD COLUMN IF NOT EXISTS trial_type TEXT;
 
-                -- 8. Stale subscription and trial expiry function
-                CREATE OR REPLACE FUNCTION core.expire_stale_subscriptions()
-                RETURNS void AS $fn$
-                BEGIN
-                    UPDATE core.subscriptions
-                    SET status = 'expired', updated_at = NOW()
-                    WHERE status = 'active'
-                      AND expires_at IS NOT NULL
-                      AND expires_at < NOW();
-
-                    UPDATE core.users u
-                    SET plan = 'free', plan_expires_at = NULL
-                    WHERE plan != 'free'
-                      AND plan != 'lifetime'
-                      AND NOT EXISTS (
-                          SELECT 1 FROM core.subscriptions s
-                          WHERE s.user_id = u.user_id
-                            AND s.status = 'active'
-                      );
-
-                    UPDATE core.users
-                    SET trial_expires_at = NULL, trial_type = NULL
-                    WHERE trial_expires_at IS NOT NULL
-                      AND trial_expires_at < NOW();
-                END;
-                $fn$ LANGUAGE plpgsql;
+                -- 8. Stale subscription / trial expiry function: see app/billing_hardening.sql
 
                 -- 9. Staff Users Table for CMS RBAC
                 CREATE TABLE IF NOT EXISTS core.staff_users (
@@ -250,6 +229,15 @@ async def init_db():
 
 
         
+        print("Applying billing hardening migration...")
+        try:
+            with open("app/billing_hardening.sql", "r", encoding="utf-8") as hf:
+                await conn.execute(hf.read())
+            print("Billing hardening applied successfully.")
+        except Exception as e:
+            print(f"ERROR: billing hardening migration FAILED: {e}")
+            raise
+
         await conn.close()
     except Exception as e:
         print(f"Error: {e}")

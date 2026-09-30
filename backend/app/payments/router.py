@@ -9,6 +9,7 @@ Endpoints:
   POST /api/payments/cancel             → Cancel an active subscription
 """
 import os
+import re
 import uuid
 import json
 import httpx
@@ -20,10 +21,12 @@ from typing import Optional
 from app.auth.jwt import verify_jwt, verify_jwt_optional
 from app.db import get_pool
 from app.payments.subscription_service import (
+    PLAN_PRICES,
     create_pending_subscription,
     activate_subscription,
     get_active_subscription,
-    has_active_subscription,
+    get_purchase_block,
+    revoke_subscription,
     verify_cashfree_webhook_signature,
 )
 from app.metrics import (
@@ -54,10 +57,31 @@ CASHFREE_HEADERS = {
 }
 
 PLAN_DETAILS = {
-    "monthly":  {"name": "Monthly Plan",  "amount": 899.00},
-    "yearly":   {"name": "Yearly Plan",   "amount": 1499.00},
-    "lifetime": {"name": "Lifetime Plan", "amount": 4999.00},
+    "monthly":  {"name": "Monthly Plan",  "amount": PLAN_PRICES["monthly"]},
+    "yearly":   {"name": "Yearly Plan",   "amount": PLAN_PRICES["yearly"]},
+    "lifetime": {"name": "Lifetime Plan", "amount": PLAN_PRICES["lifetime"]},
 }
+
+# Orders created by create_order() look like dsql_<plan>_<10 hex chars>. Anything else (coupon / manual-grant
+# reference numbers, or attacker-supplied text) is never sent to Cashfree.
+ORDER_ID_RE = re.compile(r"^dsql_(monthly|yearly|lifetime)_[0-9a-f]{10}$")
+
+
+def _extract_order_id(data: dict) -> Optional[str]:
+    """Cashfree puts the order id in different places depending on the event type."""
+    for path in (
+        ("order", "order_id"),
+        ("order_id",),
+        ("refund", "order_id"),
+        ("dispute", "order_id"),
+        ("order_details", "order_id"),
+    ):
+        cur = data
+        for key in path:
+            cur = cur.get(key) if isinstance(cur, dict) else None
+        if isinstance(cur, str) and cur:
+            return cur
+    return None
 
 
 # ─── Pydantic models ─────────────────────────────────────────────────────────
@@ -100,12 +124,11 @@ async def create_order(
         customer_name = (db_user["full_name"] if db_user and db_user["full_name"] else "Daily SQL User")
         customer_email = (db_user["email"] if db_user and db_user["email"] else user_email)
 
-        # Block if already has active subscription (idempotency guard)
-        if await has_active_subscription(conn, user_id):
-            raise HTTPException(
-                status_code=409,
-                detail="already_subscribed",
-            )
+        # Trial users may buy, the same plan renews and a higher plan upgrades. Only a Lifetime holder,
+        # or buying a plan lower than the one already held, is refused.
+        block = await get_purchase_block(conn, user_id, payload.plan_id)
+        if block:
+            raise HTTPException(status_code=409, detail=block)
 
         # Create Cashfree order
         cashfree_payload = {
@@ -139,6 +162,10 @@ async def create_order(
                     err = exc.response.json()
                 except Exception:
                     err = exc.response.text
+                # Our own credentials/config problems must not look like the user's login failing
+                if exc.response.status_code in (401, 403):
+                    print(f"[Payments] Cashfree rejected our credentials: {err}")
+                    raise HTTPException(status_code=502, detail="Payment provider is temporarily unavailable.")
                 raise HTTPException(status_code=exc.response.status_code, detail=err)
             except Exception as exc:
                 raise HTTPException(status_code=502, detail=f"Cashfree unavailable: {exc}")
@@ -163,7 +190,11 @@ async def create_order(
 async def cashfree_webhook(request: Request):
     """
     Receives async payment notifications from Cashfree.
-    Verifies HMAC-SHA256 signature and activates the subscription on PAYMENT_SUCCESS.
+    Verifies the HMAC-SHA256 signature, then:
+      - PAYMENT_SUCCESS_WEBHOOK  → activates the plan (idempotent, exactly once)
+      - REFUND_STATUS_WEBHOOK    → a fully refunded order loses its access
+      - DISPUTE_CREATED          → a chargeback suspends the access it gave
+    Everything else is acknowledged and ignored.
     """
     raw_body = await request.body()
 
@@ -189,25 +220,77 @@ async def cashfree_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     event_type = body.get("type", "")
-    data = body.get("data", {})
-    order_data = data.get("order", {})
-    payment_data = data.get("payment", {})
+    data = body.get("data") or {}
+    order_id = _extract_order_id(data)
 
-    order_id = order_data.get("order_id") or data.get("order_id")
-    cf_payment_id = payment_data.get("cf_payment_id") or data.get("cf_payment_id")
-    amount_paid = float(payment_data.get("payment_amount") or order_data.get("order_amount") or 0)
+    if not order_id:
+        CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type or "other", status="ignored").inc()
+        return {"status": "ok"}
 
-    if event_type == "PAYMENT_SUCCESS_WEBHOOK" and order_id:
-        pool = await get_pool()
+    pool = await get_pool()
+
+    if event_type == "PAYMENT_SUCCESS_WEBHOOK":
+        order_data = data.get("order") or {}
+        payment_data = data.get("payment") or {}
+        cf_payment_id = payment_data.get("cf_payment_id") or data.get("cf_payment_id")
+        amount_paid = float(payment_data.get("payment_amount") or order_data.get("order_amount") or 0)
+        order_amount = order_data.get("order_amount")
         async with pool.acquire() as conn:
-            result = await activate_subscription(conn, order_id, str(cf_payment_id), amount_paid)
-            if result:
-                CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type, status="success").inc()
-                PAYMENT_SUCCESS.labels(plan_id=result.get("plan_id", "unknown")).inc()
-                print(f"[Webhook] Subscription activated: user={result['user_id']} plan={result['plan_id']}")
-            else:
-                CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type, status="order_not_found").inc()
-                print(f"[Webhook] No pending subscription found for order_id={order_id}")
+            result = await activate_subscription(
+                conn, order_id, str(cf_payment_id), amount_paid,
+                order_amount=float(order_amount) if order_amount is not None else None,
+            )
+        if result is None:
+            CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type, status="order_not_found").inc()
+            print(f"[Webhook] No pending subscription found for order_id={order_id}")
+        elif result.get("activated"):
+            CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type, status="success").inc()
+            PAYMENT_SUCCESS.labels(plan_id=result.get("plan_id", "unknown")).inc()
+            print(f"[Webhook] Subscription activated: user={result['user_id']} plan={result['plan_id']}")
+        else:
+            reason = result.get("reason", "ignored")
+            CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type, status=reason).inc()
+            if reason == "amount_mismatch":
+                print(f"[Webhook] REFUSED to activate {order_id}: order amount does not match the plan price")
+
+    elif event_type == "REFUND_STATUS_WEBHOOK":
+        refund = data.get("refund") or {}
+        if str(refund.get("refund_status", "")).upper() == "SUCCESS":
+            refunded = float(refund.get("refund_amount") or 0)
+            async with pool.acquire() as conn:
+                sub = await conn.fetchrow(
+                    "SELECT plan_id, amount_paid FROM core.subscriptions WHERE cashfree_order_id = $1",
+                    order_id,
+                )
+                paid = float(sub["amount_paid"] or 0) if sub else 0.0
+                if sub and paid <= 0:
+                    paid = PLAN_PRICES.get(sub["plan_id"], 0.0)
+                if sub and refunded >= paid - 0.01:
+                    revoked = await revoke_subscription(
+                        conn, order_id, "refunded", reason="Full refund via Cashfree", refunded_amount=refunded,
+                    )
+                    status = "revoked" if revoked else "nothing_to_revoke"
+                    print(f"[Webhook] Refund {status}: order={order_id} amount={refunded}")
+                elif sub:
+                    await conn.execute(
+                        "UPDATE core.subscriptions SET refunded_amount = GREATEST(COALESCE(refunded_amount, 0), $2), "
+                        "updated_at = NOW() WHERE cashfree_order_id = $1",
+                        order_id, refunded,
+                    )
+                    status = "partial_recorded"
+                    print(f"[Webhook] Partial refund recorded (access kept): order={order_id} amount={refunded}")
+                else:
+                    status = "order_not_found"
+            CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type, status=status).inc()
+        else:
+            CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type, status="not_final").inc()
+
+    elif event_type == "DISPUTE_CREATED":
+        async with pool.acquire() as conn:
+            revoked = await revoke_subscription(conn, order_id, "disputed", reason="Chargeback / dispute opened")
+        CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type, status="revoked" if revoked else "nothing_to_revoke").inc()
+        print(f"[Webhook] Dispute opened: order={order_id} access {'suspended' if revoked else 'unchanged'}")
+
     else:
         CASHFREE_WEBHOOK_STATUS.labels(event_type=event_type or "other", status="ignored").inc()
 
@@ -220,9 +303,27 @@ async def cashfree_webhook(request: Request):
 async def verify_order(order_id: str, user: dict = Depends(verify_jwt)):
     """
     Frontend polls this after the Cashfree modal closes to confirm payment status.
-    Also activates subscription if Cashfree says PAID but webhook hasn't fired yet.
+    Also activates the plan if Cashfree says PAID but the webhook has not arrived yet.
+    Safe to call any number of times: activation happens at most once per order, and a cancelled,
+    expired, refunded or revoked order is never re-activated by calling this again.
     """
-    # Call Cashfree to get real-time order status
+    if not ORDER_ID_RE.match(order_id):
+        raise HTTPException(status_code=400, detail="Invalid order id")
+
+    pool = await get_pool()
+
+    # SECURITY: check ownership BEFORE spending an outbound Cashfree call on this order id
+    async with pool.acquire() as conn:
+        owner_row = await conn.fetchrow(
+            "SELECT user_id FROM core.subscriptions WHERE cashfree_order_id = $1",
+            order_id,
+        )
+    if not owner_row or str(owner_row["user_id"]) != str(user["user_id"]):
+        raise HTTPException(status_code=403, detail="Order not found or does not belong to you")
+
+    # One HTTP client for both Cashfree calls (the client must still be open for the second one)
+    cf_payment_id = None
+    amount_paid = None
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.get(
@@ -237,22 +338,10 @@ async def verify_order(order_id: str, user: dict = Depends(verify_jwt)):
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc))
 
-    order_status = cf_order.get("order_status")  # PAID | ACTIVE | EXPIRED
+        order_status = cf_order.get("order_status")  # PAID | ACTIVE | EXPIRED
 
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        # SECURITY: Verify this order was created by the requesting user
-        owner_row = await conn.fetchrow(
-            "SELECT user_id FROM core.subscriptions WHERE cashfree_order_id = $1",
-            order_id,
-        )
-        if not owner_row or str(owner_row["user_id"]) != str(user["user_id"]):
-            raise HTTPException(status_code=403, detail="Order not found or does not belong to you")
-
-        # If Cashfree says PAID, activate in DB (idempotent — handles webhook delay)
         if order_status == "PAID":
-            # Try to find payment id from Cashfree payments list
-            cf_payment_id = cf_order.get("cf_order_id", "unknown")
+            cf_payment_id = str(cf_order.get("cf_order_id", "unknown"))
             try:
                 pay_resp = await client.get(
                     f"{CASHFREE_BASE_URL}/orders/{order_id}/payments",
@@ -260,14 +349,26 @@ async def verify_order(order_id: str, user: dict = Depends(verify_jwt)):
                     timeout=10.0,
                 )
                 if pay_resp.status_code == 200:
-                    payments = pay_resp.json()
-                    if payments:
-                        cf_payment_id = str(payments[0].get("cf_payment_id", cf_payment_id))
-            except Exception:
-                pass
+                    successful = [p for p in (pay_resp.json() or []) if str(p.get("payment_status", "")).upper() == "SUCCESS"]
+                    if successful:
+                        cf_payment_id = str(successful[0].get("cf_payment_id", cf_payment_id))
+                        amount_paid = float(successful[0].get("payment_amount") or 0) or None
+            except Exception as exc:
+                print(f"[Payments] payment-id lookup failed for {order_id}: {exc}")
 
-            amount = float(cf_order.get("order_amount", 0))
-            await activate_subscription(conn, order_id, cf_payment_id, amount)
+    order_amount = cf_order.get("order_amount")
+
+    async with pool.acquire() as conn:
+        if order_status == "PAID":
+            result = await activate_subscription(
+                conn,
+                order_id,
+                cf_payment_id or "unknown",
+                amount_paid if amount_paid is not None else float(order_amount or 0),
+                order_amount=float(order_amount) if order_amount is not None else None,
+            )
+            if result and result.get("activated"):
+                PAYMENT_SUCCESS.labels(plan_id=result.get("plan_id", "unknown")).inc()
 
         # Return current subscription state
         sub = await get_active_subscription(conn, user["user_id"])
@@ -306,8 +407,10 @@ async def cancel_subscription(
     user: dict = Depends(verify_jwt),
 ):
     """
-    Marks the user's active subscription as cancelled.
-    Access continues until expires_at — no mid-cycle refund here.
+    Marks the user's paid Monthly/Yearly subscription as cancelled.
+    Nothing is charged automatically, so this only records the decision. Access continues
+    until the end of the period that was paid for (see the Refund Policy). Lifetime plans are a
+    single payment and cannot be cancelled.
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -315,17 +418,32 @@ async def cancel_subscription(
             """
             UPDATE core.subscriptions
             SET status = 'cancelled', updated_at = NOW()
-            WHERE user_id = $1 AND status = 'active'
+            WHERE user_id = $1
+              AND status = 'active'
+              AND plan_id <> 'lifetime'
+              AND expires_at IS NOT NULL
+              AND expires_at > NOW()
             """,
             user["user_id"],
         )
-        # SECURITY FIX: Only downgrade to free once the plan actually expires.
-        # Immediately reset would break the paid user's remaining period.
-        # For lifetime users, do nothing (they paid once, forever).
-        # For monthly/yearly, just mark cancelled — expiry sweep handles the rest.
-        # We do NOT reset plan here; let expire_stale_subscriptions() do it.
+        has_lifetime = False
+        if result == "UPDATE 0":
+            has_lifetime = bool(await conn.fetchval(
+                "SELECT 1 FROM core.subscriptions WHERE user_id = $1 AND plan_id = 'lifetime' "
+                "AND status IN ('active', 'cancelled') LIMIT 1",
+                user["user_id"],
+            ))
 
     if result == "UPDATE 0":
+        if has_lifetime:
+            raise HTTPException(
+                status_code=400,
+                detail="A Lifetime plan is a one-time payment and does not renew, so there is nothing to cancel.",
+            )
         raise HTTPException(status_code=404, detail="No active subscription to cancel")
 
-    return {"success": True, "message": "Subscription cancelled successfully."}
+    return {
+        "success": True,
+        "message": "Your plan will not renew. You keep full access until the end of the period you paid for.",
+    }
+

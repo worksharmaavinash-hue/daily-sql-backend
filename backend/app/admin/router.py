@@ -1792,22 +1792,39 @@ class GrantSubscriptionRequest(BaseModel):
     email: str
     plan_id: str  # 'monthly' | 'yearly' | 'lifetime' | 'free'
     duration_days: Optional[int] = None  # If None, defaults to standard plan duration (30/365/forever)
+    reason: Optional[str] = None  # recorded in the audit trail
+    allow_downgrade: bool = False  # must be true to replace a higher plan with a lower one
 
 
 @router.post("/subscriptions/grant", dependencies=[Depends(require_admin_role)])
-async def grant_admin_subscription(payload: GrantSubscriptionRequest):
+async def grant_admin_subscription(payload: GrantSubscriptionRequest, request: Request):
     """
-    Manually grant or modify a plan for a user (useful for admin upgrades / customer support).
+    Manually grant, change or REVOKE a plan for a user (customer support / admin upgrades).
+    - plan_id 'free' revokes every paid subscription the user has and ends any live trial.
+    - Granting a plan lower than the one the user holds is refused unless allow_downgrade is true.
+    - Every grant records who made it (granted_by) for the audit trail.
     """
     pool = await get_pool()
     from datetime import datetime, timezone, timedelta
-    from app.payments.subscription_service import PLAN_DURATIONS
+    import uuid
+    from app.payments.subscription_service import (
+        PLAN_DURATIONS,
+        PLAN_RANK,
+        revoke_user_subscriptions,
+        _live_paid_plan as live_paid_plan,
+    )
+
+    staff = getattr(request.state, "staff", None) or {}
+    actor = staff.get("email") or staff.get("staff_id") or "unknown"
+    note = f" — {payload.reason.strip()}" if payload.reason and payload.reason.strip() else ""
 
     email_clean = payload.email.lower().strip()
     plan_id = payload.plan_id.lower().strip()
 
     if plan_id not in ("free", "monthly", "yearly", "lifetime"):
         raise HTTPException(status_code=400, detail="Invalid plan_id. Must be 'free', 'monthly', 'yearly', or 'lifetime'.")
+    if payload.duration_days is not None and not (1 <= payload.duration_days <= 3650):
+        raise HTTPException(status_code=400, detail="duration_days must be between 1 and 3650.")
 
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
@@ -1820,39 +1837,66 @@ async def grant_admin_subscription(payload: GrantSubscriptionRequest):
         user_id = user["user_id"]
         now = datetime.now(timezone.utc)
 
-        if plan_id == "free":
-            plan_expires_at = None
-        elif plan_id == "lifetime":
-            plan_expires_at = None
-        else:
-            days = payload.duration_days or PLAN_DURATIONS.get(plan_id, 30)
-            plan_expires_at = now + timedelta(days=days)
+        async with conn.transaction():
+            current = await conn.fetchrow(
+                "SELECT plan, plan_expires_at FROM core.users WHERE user_id = $1 FOR UPDATE",
+                user_id,
+            )
+            live = live_paid_plan(current["plan"], current["plan_expires_at"], now)
 
-        # Update user
-        await conn.execute(
-            """
-            UPDATE core.users
-            SET plan = $1, plan_expires_at = $2, trial_expires_at = NULL, trial_type = NULL
-            WHERE user_id = $3
-            """,
-            plan_id,
-            plan_expires_at,
-            user_id,
-        )
+            if plan_id == "free":
+                revoked = await revoke_user_subscriptions(conn, user_id, f"Revoked by {actor}{note}")
+                await conn.execute(
+                    """
+                    UPDATE core.users
+                    SET trial_expires_at = CASE WHEN trial_expires_at IS NOT NULL AND trial_expires_at > $1
+                                                THEN $1 ELSE trial_expires_at END
+                    WHERE user_id = $2
+                    """,
+                    now, user_id,
+                )
+                return {
+                    "status": "success",
+                    "email": email_clean,
+                    "plan_granted": "free",
+                    "subscriptions_revoked": revoked,
+                    "expires_at": None,
+                }
 
-        # Record in subscriptions table
-        if plan_id != "free":
-            import uuid
+            if live and PLAN_RANK[plan_id] < PLAN_RANK[live]:
+                if not payload.allow_downgrade:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"User currently holds the higher plan '{live}'. Set allow_downgrade=true to replace it.",
+                    )
+                await revoke_user_subscriptions(conn, user_id, f"Replaced by lower plan grant from {actor}{note}")
+
+            if plan_id == "lifetime":
+                plan_expires_at = None
+            else:
+                days = payload.duration_days or PLAN_DURATIONS.get(plan_id, 30)
+                plan_expires_at = now + timedelta(days=days)
+
+            await conn.execute(
+                """
+                UPDATE core.users
+                SET plan = $1,
+                    plan_expires_at = $2,
+                    trial_expires_at = CASE WHEN trial_expires_at IS NOT NULL AND trial_expires_at > $3
+                                            THEN $3 ELSE trial_expires_at END
+                WHERE user_id = $4
+                """,
+                plan_id, plan_expires_at, now, user_id,
+            )
+
             order_id = f"manual_grant_{uuid.uuid4().hex[:12]}"
             await conn.execute(
                 """
-                INSERT INTO core.subscriptions (user_id, plan_id, status, cashfree_order_id, starts_at, expires_at, amount_paid)
-                VALUES ($1, $2, 'active', $3, NOW(), $4, 0.0)
+                INSERT INTO core.subscriptions
+                    (user_id, plan_id, status, cashfree_order_id, starts_at, expires_at, amount_paid, granted_by)
+                VALUES ($1, $2, 'active', $3, NOW(), $4, 0.0, $5)
                 """,
-                user_id,
-                plan_id,
-                order_id,
-                plan_expires_at,
+                user_id, plan_id, order_id, plan_expires_at, f"{actor}{note}",
             )
 
     return {
@@ -1860,7 +1904,5 @@ async def grant_admin_subscription(payload: GrantSubscriptionRequest):
         "email": email_clean,
         "plan_granted": plan_id,
         "expires_at": plan_expires_at.isoformat() if plan_expires_at else None,
+        "granted_by": actor,
     }
-
-
-
