@@ -342,7 +342,7 @@ async def create_problem(payload: ProblemCreate):
             payload.difficulty,
             payload.description,
             payload.estimated_time_minutes,
-            False,  # New problems start as drafts
+            payload.is_active,
             payload.challenge_type,
         )
 
@@ -677,7 +677,7 @@ async def schedule_daily_practice(payload: DailyPracticeCreate):
 @router.patch("/problems/{problem_id}")
 async def edit_problem(problem_id: str, payload: dict):
     """Edit an existing problem's metadata, including publish/draft status."""
-    allowed = {"title", "difficulty", "description", "estimated_time_minutes", "is_active"}
+    allowed = {"title", "difficulty", "description", "estimated_time_minutes", "is_active", "challenge_type"}
     updates = {k: v for k, v in payload.items() if k in allowed}
     if not updates:
         return {"status": "no_changes"}
@@ -788,7 +788,15 @@ async def delete_dataset(problem_id: str, dataset_id: str):
 @router.patch("/problems/{problem_id}/solution")
 async def edit_solution(problem_id: str, payload: dict):
     """Edit the reference solution for a problem."""
-    allowed = {"reference_query", "reference_code", "order_sensitive", "notes"}
+    allowed = {
+        "reference_query",
+        "mysql_reference_query",
+        "reference_code",
+        "function_name",
+        "starter_code",
+        "order_sensitive",
+        "notes",
+    }
     updates = {k: v for k, v in payload.items() if k in allowed}
     if not updates:
         return {"status": "no_changes"}
@@ -802,13 +810,66 @@ async def edit_solution(problem_id: str, payload: dict):
         if not challenge_type:
             raise HTTPException(status_code=404, detail="Problem not found")
 
-        if challenge_type != 'sql' and "reference_code" in updates:
-            # Re-compute and cache the reference output via Docker Engine sandbox
+        if challenge_type == 'python_dsa':
+            if "reference_code" in updates:
+                # Dry run against existing test cases if reference_code is updated
+                fn_name = updates.get("function_name")
+                if not fn_name:
+                    fn_name = await conn.fetchval(
+                        "SELECT function_name FROM core.problem_solutions WHERE problem_id = $1",
+                        problem_id
+                    ) or "solve"
+
+                tcs = await conn.fetch(
+                    "SELECT input_data, expected, label FROM core.problem_test_cases WHERE problem_id = $1 ORDER BY order_index",
+                    problem_id
+                )
+                if tcs:
+                    formatted_tcs = [
+                        {
+                            "input_data": json.loads(tc["input_data"]) if isinstance(tc["input_data"], str) else tc["input_data"],
+                            "expected": json.loads(tc["expected"]) if isinstance(tc["expected"], str) else tc["expected"],
+                            "label": tc["label"] or f"Case {i+1}",
+                        }
+                        for i, tc in enumerate(tcs)
+                    ]
+                    from app.execution.engines import get_engine
+                    engine = get_engine(challenge_type)
+                    exec_result = await engine.run(
+                        updates["reference_code"],
+                        problem_id,
+                        conn,
+                        datasets={},
+                        test_cases=formatted_tcs,
+                        function_name=fn_name,
+                    )
+                    if exec_result.get("error"):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Admin Reference Code Failed to Execute: {exec_result['error']}"
+                        )
+                    failed = [r for r in exec_result.get("results", []) if not r.get("passed")]
+                    if failed:
+                        labels = ", ".join(r.get("label") or "unlabeled" for r in failed)
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Reference code failed {len(failed)} test case(s): {labels}."
+                        )
+            updates["reference_output"] = None
+
+        elif challenge_type != 'sql' and "reference_code" in updates:
+            # Python (Pandas) / PySpark: pre-compute and cache reference_output
             datasets = await conn.fetch(
                 "SELECT table_name, seed_data_json FROM core.problem_datasets WHERE problem_id = $1",
                 problem_id
             )
-            payload_data = {d["table_name"]: d["seed_data_json"] for d in datasets}
+            payload_data = {
+                d["table_name"]: (
+                    json.loads(d["seed_data_json"]) if isinstance(d["seed_data_json"], str)
+                    else d["seed_data_json"]
+                ) if d["seed_data_json"] is not None else {"columns": [], "rows": []}
+                for d in datasets
+            }
             
             from app.execution.engines import get_engine
             engine = get_engine(challenge_type)

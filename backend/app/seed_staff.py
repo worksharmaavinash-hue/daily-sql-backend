@@ -72,9 +72,9 @@ async def seed_staff(email: str, password: str, full_name: str, role: str = "adm
         await conn.close()
 
 if __name__ == "__main__":
-    email = sys.argv[1] if len(sys.argv) > 1 else "admin@dailysql.com"
+    email = sys.argv[1] if len(sys.argv) > 1 else "admin@dailysql.in"
     password = sys.argv[2] if len(sys.argv) > 2 else "Admin@123456"
     full_name = sys.argv[3] if len(sys.argv) > 3 else "Platform Admin"
-    role = sys.argv[4] if len(sys.argv) > 4 else "admin"
+    role = sys.argv[4] if len(sys.argv) > 4 else "superadmin"
 
     asyncio.run(seed_staff(email, password, full_name, role))

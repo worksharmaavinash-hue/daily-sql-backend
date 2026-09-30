@@ -31,8 +31,11 @@ def run_spark_sandbox():
             pdf = pd.DataFrame(rows, columns=cols)
             df = spark.createDataFrame(pdf)
             
-            # Inject "employees_df" and register as Spark temp view so they can write spark.sql("...")
+            # Inject "employees_df", "employees", and "df" and register as Spark temp view
             global_namespace[f"{table_name}_df"] = df
+            global_namespace[table_name] = df
+            if "df" not in global_namespace:
+                global_namespace["df"] = df
             df.createOrReplaceTempView(table_name)
             
         # 3. Execute code

@@ -154,6 +154,8 @@ def run_code_in_thread(code: str, data_payload: dict):
             
             global_namespace[f"{table_name}_df"] = df
             global_namespace[table_name] = df
+            if "df" not in global_namespace:
+                global_namespace["df"] = df
             df.createOrReplaceTempView(table_name)
 
         # 2. Run user code
