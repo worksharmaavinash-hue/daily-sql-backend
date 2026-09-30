@@ -344,7 +344,28 @@ async def t_no_downgrade_and_amount():
     oid = await order_for(uid, em, "yearly")
     CF.update(amount=1499.0)
     await verify(uid, em, oid)
-    check("monthly -> yearly upgrade applies the yearly plan", (await usr(uid))["plan"] == "yearly")
+    u = await usr(uid)
+    d = (u["plan_expires_at"] - NOW()).days
+    check("monthly -> yearly upgrade applies the yearly plan", u["plan"] == "yearly")
+    check("...and STACKS on the monthly plan's remaining 10 days (~375 days, not 365)", 373 <= d <= 375, str(d))
+
+    print("\n[#1b] buying a paid plan mid-trial stacks onto the trial's remaining time")
+    uid, em = await new_user(trial_exp=NOW() + timedelta(days=4), trial_type="new_signup")
+    oid = await order_for(uid, em, "monthly")
+    CF.update(amount=899.0)
+    await verify(uid, em, oid)
+    u = await usr(uid)
+    d = (u["plan_expires_at"] - NOW()).days
+    check("paid plan starts after the trial ends, not today (~34 days, not 30)", 33 <= d <= 34, str(d))
+    check("the trial itself is ended now that paid access covers it", u["trial_expires_at"] <= NOW() + timedelta(seconds=5))
+
+    print("\n[#1c] a plain first purchase (no live plan, no live trial) is unaffected")
+    uid, em = await new_user()
+    oid = await order_for(uid, em, "monthly")
+    CF.update(amount=899.0)
+    await verify(uid, em, oid)
+    d = ((await usr(uid))["plan_expires_at"] - NOW()).days
+    check("fresh monthly purchase is ~30 days, not stacked onto anything", 29 <= d <= 30, str(d))
 
 
 async def t_verify_hardening():
