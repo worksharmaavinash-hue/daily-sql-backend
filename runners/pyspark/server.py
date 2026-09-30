@@ -19,15 +19,15 @@ class ExecuteRequest(BaseModel):
 
 def _create_spark():
     """Create a new SparkSession with memory-safe settings."""
-    # In local[1] mode, executor runs inside the driver JVM — executor.memory is ignored.
-    # Only driver.memory matters for total JVM heap.
+    # JVM heap is controlled by JAVA_TOOL_OPTIONS env var (set in docker-compose).
+    # spark.driver.memory / spark.executor.memory are NO-OPs in standalone Python
+    # mode because the JVM is already launched by Py4J before these configs are read.
     return SparkSession.builder \
         .master("local[1]") \
         .appName("DailySQLSparkSandbox") \
         .config("spark.ui.enabled", "false") \
         .config("spark.driver.host", "127.0.0.1") \
         .config("spark.driver.bindAddress", "127.0.0.1") \
-        .config("spark.driver.memory", "512m") \
         .config("spark.sql.shuffle.partitions", "1") \
         .config("spark.sql.execution.arrow.pyspark.enabled", "false") \
         .config("spark.driver.extraJavaOptions",
@@ -37,32 +37,35 @@ def _create_spark():
                 "-XX:MetaspaceSize=64m") \
         .getOrCreate()
 
-# Initialize warm SparkSession globally on startup
-spark = _create_spark()
+# Lazy init: don't create Spark at import time — avoids crash-loops if JVM
+# fails to start (e.g. insufficient memory).  Created on first request instead.
+spark = None
 
 def get_spark():
-    """Return the live SparkSession, recreating it if the JVM has crashed."""
+    """Return the live SparkSession, creating or recreating as needed."""
     global spark
-    try:
-        # Quick health check — will throw if the JVM is unreachable
-        spark.sql("SELECT 1")
-        return spark
-    except Exception:
-        # Fully tear down the broken session + JVM gateway before recreating
+    if spark is not None:
         try:
-            spark.stop()
+            # Quick health check — will throw if the JVM is unreachable
+            spark.sql("SELECT 1")
+            return spark
         except Exception:
-            pass
-        try:
-            from pyspark import SparkContext
-            SparkContext._gateway = None
-            SparkContext._jvm = None
-        except Exception:
-            pass
-        # Clear the singleton so builder creates a truly new session
-        SparkSession._instantiatedSession = None
-        spark = _create_spark()
-        return spark
+            # Fully tear down the broken session + JVM gateway before recreating
+            try:
+                spark.stop()
+            except Exception:
+                pass
+            try:
+                from pyspark import SparkContext
+                SparkContext._gateway = None
+                SparkContext._jvm = None
+            except Exception:
+                pass
+            # Clear the singleton so builder creates a truly new session
+            SparkSession._instantiatedSession = None
+
+    spark = _create_spark()
+    return spark
 
 def cleanup_spark(spark_session):
     """Free JVM + Python memory after each execution."""
@@ -151,6 +154,8 @@ def run_code_in_thread(code: str, data_payload: dict):
             
             global_namespace[f"{table_name}_df"] = df
             global_namespace[table_name] = df
+            if "df" not in global_namespace:
+                global_namespace["df"] = df
             df.createOrReplaceTempView(table_name)
 
         # 2. Run user code

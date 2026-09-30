@@ -9,6 +9,7 @@ class ProblemCreate(BaseModel):
     description: str
     estimated_time_minutes: int
     challenge_type: str = "sql"  # "sql" | "python" | "pyspark" | "python_dsa"
+    is_active: bool = False
 
 class DatasetCreate(BaseModel):
     table_name: str

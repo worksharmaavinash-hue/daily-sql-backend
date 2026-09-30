@@ -92,6 +92,42 @@ services:
     networks:
       - runner-test-net
 
+  # Prometheus Metrics Scraper (Staging)
+  prometheus-staging:
+    image: prom/prometheus:latest
+    container_name: dailysql_prometheus_test
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    depends_on:
+      - dailysql-api-staging
+    networks:
+      dailysql-test-network:
+        aliases:
+          - prometheus
+
+  # Grafana Dashboard (Staging)
+  grafana-staging:
+    image: grafana/grafana:latest
+    container_name: dailysql_grafana_test
+    ports:
+      - "3005:3000"
+    environment:
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_DISABLE_LOGIN_FORM=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus-staging
+    networks:
+      - dailysql-test-network
+
 volumes:
   postgres_data_test:
   mysql_data_test:

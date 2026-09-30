@@ -13,14 +13,17 @@ from app.admin.schemas import (
     WhitelistBulkCreate
 )
 from app.execution.sql_dialect_generator import SqlDialectGenerator
+from pydantic import BaseModel
 
 from app.auth.jwt import _decode_token
+
 import json
 import os
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List
+from typing import List, Optional
 from uuid import UUID as PyUUID
+
 from app.admin.analytics_router import router as analytics_router
 
 
@@ -51,30 +54,69 @@ def _get_supported_dialects(datasets) -> list:
 
 
 
+import hmac as _hmac
+
 API_KEY_NAME = "X-Admin-Secret"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
+_ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
+if not _ADMIN_SECRET:
+    import warnings
+    warnings.warn(
+        "ADMIN_SECRET environment variable is not set! Admin API is UNPROTECTED. "
+        "Set ADMIN_SECRET to a strong random value before deploying.",
+        RuntimeWarning,
+        stacklevel=1,
+    )
+
 async def get_admin_api_key(request: Request, api_key: str = Security(api_key_header)):
+    """
+    Validates either:
+    1. Legacy X-Admin-Secret header (constant-time comparison prevents timing attacks)
+    2. Bearer token (Staff JWT with 'writer', 'admin', or 'superadmin' role, or consumer admin token)
+    """
     # 1. Check legacy X-Admin-Secret header
-    expected_secret = os.getenv("ADMIN_SECRET", "admin_secret")
-    if api_key and api_key == expected_secret:
+    if api_key and _ADMIN_SECRET and _hmac.compare_digest(api_key, _ADMIN_SECRET):
+        request.state.staff = {"role": "superadmin", "email": "system@admin", "staff_id": "legacy_admin"}
         return api_key
-    
+
     # 2. Check for Authorization: Bearer <token>
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header.split(" ")[1]
         try:
             payload = _decode_token(token)
+            # Staff token
+            if payload.get("token_type") == "staff":
+                role = payload.get("role", "writer")
+                request.state.staff = {
+                    "role": role,
+                    "email": payload.get("email"),
+                    "staff_id": payload.get("sub"),
+                    "full_name": payload.get("full_name")
+                }
+                return token
+            # Legacy consumer admin token
             if payload.get("admin") is True:
+                request.state.staff = {"role": "admin", "email": payload.get("email"), "staff_id": payload.get("sub")}
                 return token
         except Exception:
             pass
 
-    raise HTTPException(status_code=403, detail="Admin access required")
+    raise HTTPException(status_code=403, detail="Staff or Admin access required")
+
+
+async def require_admin_role(request: Request, _auth = Depends(get_admin_api_key)):
+    """Strict guard for endpoints that must only be accessed by admins (not writers)."""
+    staff = getattr(request.state, "staff", {})
+    if staff.get("role") not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="Admin permissions required for this resource")
+    return staff
+
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_admin_api_key)])
-router.include_router(analytics_router)
+router.include_router(analytics_router, dependencies=[Depends(require_admin_role)])
+
 
 
 # ============ GET ENDPOINTS (For Admin UI) ============
@@ -300,11 +342,11 @@ async def create_problem(payload: ProblemCreate):
             payload.difficulty,
             payload.description,
             payload.estimated_time_minutes,
-            False,  # New problems start as drafts
+            payload.is_active,
             payload.challenge_type,
         )
 
-    return {"problem_id": str(problem_id)}
+    return {"problem_id": str(problem_id), "id": str(problem_id)}
 
 @router.post("/problems/{problem_id}/datasets")
 async def add_dataset(problem_id: str, payload: DatasetCreate):
@@ -635,7 +677,7 @@ async def schedule_daily_practice(payload: DailyPracticeCreate):
 @router.patch("/problems/{problem_id}")
 async def edit_problem(problem_id: str, payload: dict):
     """Edit an existing problem's metadata, including publish/draft status."""
-    allowed = {"title", "difficulty", "description", "estimated_time_minutes", "is_active"}
+    allowed = {"title", "difficulty", "description", "estimated_time_minutes", "is_active", "challenge_type"}
     updates = {k: v for k, v in payload.items() if k in allowed}
     if not updates:
         return {"status": "no_changes"}
@@ -746,7 +788,15 @@ async def delete_dataset(problem_id: str, dataset_id: str):
 @router.patch("/problems/{problem_id}/solution")
 async def edit_solution(problem_id: str, payload: dict):
     """Edit the reference solution for a problem."""
-    allowed = {"reference_query", "reference_code", "order_sensitive", "notes"}
+    allowed = {
+        "reference_query",
+        "mysql_reference_query",
+        "reference_code",
+        "function_name",
+        "starter_code",
+        "order_sensitive",
+        "notes",
+    }
     updates = {k: v for k, v in payload.items() if k in allowed}
     if not updates:
         return {"status": "no_changes"}
@@ -760,13 +810,66 @@ async def edit_solution(problem_id: str, payload: dict):
         if not challenge_type:
             raise HTTPException(status_code=404, detail="Problem not found")
 
-        if challenge_type != 'sql' and "reference_code" in updates:
-            # Re-compute and cache the reference output via Docker Engine sandbox
+        if challenge_type == 'python_dsa':
+            if "reference_code" in updates:
+                # Dry run against existing test cases if reference_code is updated
+                fn_name = updates.get("function_name")
+                if not fn_name:
+                    fn_name = await conn.fetchval(
+                        "SELECT function_name FROM core.problem_solutions WHERE problem_id = $1",
+                        problem_id
+                    ) or "solve"
+
+                tcs = await conn.fetch(
+                    "SELECT input_data, expected, label FROM core.problem_test_cases WHERE problem_id = $1 ORDER BY order_index",
+                    problem_id
+                )
+                if tcs:
+                    formatted_tcs = [
+                        {
+                            "input_data": json.loads(tc["input_data"]) if isinstance(tc["input_data"], str) else tc["input_data"],
+                            "expected": json.loads(tc["expected"]) if isinstance(tc["expected"], str) else tc["expected"],
+                            "label": tc["label"] or f"Case {i+1}",
+                        }
+                        for i, tc in enumerate(tcs)
+                    ]
+                    from app.execution.engines import get_engine
+                    engine = get_engine(challenge_type)
+                    exec_result = await engine.run(
+                        updates["reference_code"],
+                        problem_id,
+                        conn,
+                        datasets={},
+                        test_cases=formatted_tcs,
+                        function_name=fn_name,
+                    )
+                    if exec_result.get("error"):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Admin Reference Code Failed to Execute: {exec_result['error']}"
+                        )
+                    failed = [r for r in exec_result.get("results", []) if not r.get("passed")]
+                    if failed:
+                        labels = ", ".join(r.get("label") or "unlabeled" for r in failed)
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Reference code failed {len(failed)} test case(s): {labels}."
+                        )
+            updates["reference_output"] = None
+
+        elif challenge_type != 'sql' and "reference_code" in updates:
+            # Python (Pandas) / PySpark: pre-compute and cache reference_output
             datasets = await conn.fetch(
                 "SELECT table_name, seed_data_json FROM core.problem_datasets WHERE problem_id = $1",
                 problem_id
             )
-            payload_data = {d["table_name"]: d["seed_data_json"] for d in datasets}
+            payload_data = {
+                d["table_name"]: (
+                    json.loads(d["seed_data_json"]) if isinstance(d["seed_data_json"], str)
+                    else d["seed_data_json"]
+                ) if d["seed_data_json"] is not None else {"columns": [], "rows": []}
+                for d in datasets
+            }
             
             from app.execution.engines import get_engine
             engine = get_engine(challenge_type)
@@ -854,7 +957,7 @@ async def admin_get_comments(problem_id: str):
 
 # ============ ADMIN FEEDBACK VIEW ============
 
-@router.get("/feedback")
+@router.get("/feedback", dependencies=[Depends(require_admin_role)])
 async def admin_get_feedback():
     """Get all user feedback for the admin panel."""
     pool = await get_pool()
@@ -894,7 +997,7 @@ async def admin_get_feedback():
 
 # ============ ADMIN WHITELIST MANAGEMENT ============
 
-@router.get("/whitelist")
+@router.get("/whitelist", dependencies=[Depends(require_admin_role)])
 async def list_whitelist():
     """List all whitelisted emails."""
     pool = await get_pool()
@@ -908,7 +1011,7 @@ async def list_whitelist():
     ]
 
 
-@router.post("/whitelist")
+@router.post("/whitelist", dependencies=[Depends(require_admin_role)])
 async def add_to_whitelist(payload: WhitelistCreate):
     """Add an email to the whitelist."""
     pool = await get_pool()
@@ -923,7 +1026,7 @@ async def add_to_whitelist(payload: WhitelistCreate):
     return {"status": "added"}
 
 
-@router.delete("/whitelist/{email}")
+@router.delete("/whitelist/{email}", dependencies=[Depends(require_admin_role)])
 async def remove_from_whitelist(email: str):
     """Remove an email from the whitelist."""
     pool = await get_pool()
@@ -1123,8 +1226,9 @@ async def dry_run_test_cases(problem_id: str, payload: dict):
         "total": len(results),
         "results": results,
     }
-@router.post("/whitelist/bulk")
-async def bulk_add_to_whitelist(payload: WhitelistBulkCreate):
+
+@router.post("/whitelist/bulk", dependencies=[Depends(require_admin_role)])
+async def bulk_add_whitelist(payload: WhitelistBulkCreate):
     """Bulk add emails to the whitelist."""
     pool = await get_pool()
     emails = [e.lower().strip() for e in payload.emails if e.strip()]
@@ -1142,8 +1246,8 @@ async def bulk_add_to_whitelist(payload: WhitelistBulkCreate):
 
 # ============ ADMIN WAITLIST MANAGEMENT ============
 
-@router.get("/waitlist")
-async def list_waitlist():
+@router.get("/waitlist", dependencies=[Depends(require_admin_role)])
+async def list_waitlist(status: Optional[str] = None):
     """List all waitlist entries."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1167,8 +1271,8 @@ async def list_waitlist():
     ]
 
 
-@router.post("/waitlist/{waitlist_id}/approve")
-async def approve_waitlist_entry(waitlist_id: str):
+@router.post("/waitlist/{waitlist_id}/approve", dependencies=[Depends(require_admin_role)])
+async def approve_waitlist(waitlist_id: str):
     """Approve a waitlist entry and move the email to the whitelist."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1196,8 +1300,8 @@ async def approve_waitlist_entry(waitlist_id: str):
     return {"status": "approved", "email": email}
 
 
-@router.post("/waitlist/{waitlist_id}/reject")
-async def reject_waitlist_entry(waitlist_id: str):
+@router.post("/waitlist/{waitlist_id}/reject", dependencies=[Depends(require_admin_role)])
+async def reject_waitlist(waitlist_id: str):
     """Reject a waitlist entry."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1210,8 +1314,8 @@ async def reject_waitlist_entry(waitlist_id: str):
     return {"status": "rejected"}
 
 
-@router.delete("/waitlist/{waitlist_id}", status_code=200)
-async def delete_waitlist_entry(waitlist_id: str):
+@router.delete("/waitlist/{waitlist_id}", dependencies=[Depends(require_admin_role)], status_code=200)
+async def delete_waitlist(waitlist_id: str):
     """Permanently delete a waitlist entry."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1224,8 +1328,8 @@ async def delete_waitlist_entry(waitlist_id: str):
     return {"status": "deleted"}
 
 
-@router.get("/users")
-async def list_users():
+@router.get("/users", dependencies=[Depends(require_admin_role)])
+async def list_admin_users():
     """List all registered users with detailed activity metrics for admin view"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1263,8 +1367,8 @@ async def list_users():
 
 # ============ WA GROUP CHECKLIST ============
 
-@router.get("/wa-group")
-async def list_wa_group_checklist():
+@router.get("/wa-group", dependencies=[Depends(require_admin_role)])
+async def list_wa_group_members():
     """List users with their WhatsApp group status"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1294,8 +1398,8 @@ async def list_wa_group_checklist():
     ]
 
 
-@router.post("/wa-group/{user_id}")
-async def add_to_wa_group(user_id: str):
+@router.post("/wa-group/{user_id}", dependencies=[Depends(require_admin_role)])
+async def add_wa_group_member(user_id: str):
     """Mark a user as added to the WhatsApp group"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1306,8 +1410,8 @@ async def add_to_wa_group(user_id: str):
     return {"status": "added"}
 
 
-@router.delete("/wa-group/{user_id}")
-async def remove_from_wa_group(user_id: str):
+@router.delete("/wa-group/{user_id}", dependencies=[Depends(require_admin_role)])
+async def remove_wa_group_member(user_id: str):
     """Remove a user from the WhatsApp group tracking list"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1317,3 +1421,488 @@ async def remove_from_wa_group(user_id: str):
         )
     return {"status": "removed"}
 
+
+# ============ LAUNCH TRIAL & COUPON ADMIN ENDPOINTS ============
+
+class LaunchConfigRequest(BaseModel):
+    is_active: bool
+    trial_days: int = 30
+    new_user_trial_days: int = 7
+    coupon_grace_days: int = 2
+
+
+@router.get("/launch-config", dependencies=[Depends(require_admin_role)])
+async def get_admin_launch_config():
+    """Get the current launch trial configuration"""
+    pool = await get_pool()
+    from app.payments.subscription_service import get_launch_config
+    async with pool.acquire() as conn:
+        return await get_launch_config(conn)
+
+
+@router.post("/launch-config", dependencies=[Depends(require_admin_role)])
+async def update_admin_launch_config(payload: LaunchConfigRequest):
+    """Update launch trial config and optionally toggle global trial"""
+    pool = await get_pool()
+    from app.payments.subscription_service import set_launch_config
+    async with pool.acquire() as conn:
+        return await set_launch_config(
+            conn=conn,
+            is_active=payload.is_active,
+            trial_days=payload.trial_days,
+            new_user_trial_days=payload.new_user_trial_days,
+            coupon_grace_days=payload.coupon_grace_days,
+        )
+
+
+class GenerateCouponsRequest(BaseModel):
+    emails: Optional[List[str]] = None
+    days_valid: Optional[int] = None  # If not set, falls back to launch config trial_days + grace_days
+    plan_granted: Optional[str] = "lifetime"
+
+
+@router.get("/coupons", dependencies=[Depends(require_admin_role)])
+async def list_admin_coupons():
+    """List all coupons with their usage status and expiry"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT c.code, c.email, c.plan_granted, c.is_used, c.used_at, c.expires_at, c.created_at,
+                   u.username, u.full_name,
+                   CASE 
+                       WHEN c.is_used = TRUE THEN 'Redeemed'
+                       WHEN c.expires_at IS NOT NULL AND c.expires_at <= NOW() THEN 'Expired'
+                       ELSE 'Active'
+                   END as status
+            FROM core.coupons c
+            LEFT JOIN core.users u ON LOWER(u.email) = LOWER(c.email)
+            ORDER BY c.created_at DESC
+            """
+        )
+    return [
+        {
+            "code": r["code"],
+            "email": r["email"],
+            "username": r["username"],
+            "full_name": r["full_name"],
+            "plan_granted": r["plan_granted"],
+            "is_used": r["is_used"],
+            "status": r["status"],
+            "used_at": r["used_at"].isoformat() if r["used_at"] else None,
+            "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+@router.post("/coupons/generate", dependencies=[Depends(require_admin_role)])
+async def generate_admin_coupons(payload: GenerateCouponsRequest):
+    """
+    Generate unique coupon codes for selected or all early users.
+    Output includes email, username, full_name, and coupon code.
+    Supports raw text / list of emails from WhatsApp groups or CSVs.
+    """
+    pool = await get_pool()
+    import re
+    from datetime import datetime, timezone, timedelta
+    from app.payments.subscription_service import get_launch_config, generate_coupons_for_users
+
+    async with pool.acquire() as conn:
+        # Calculate expiry date
+        cfg = await get_launch_config(conn)
+        days = payload.days_valid or (cfg.get("trial_days", 30) + cfg.get("coupon_grace_days", 2))
+        expires_at = datetime.now(timezone.utc) + timedelta(days=days)
+
+
+        clean_emails = []
+        if payload.emails and len(payload.emails) > 0:
+            for item in payload.emails:
+                if isinstance(item, str):
+                    found = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', item.lower())
+                    clean_emails.extend(found)
+
+            # Deduplicate preserving order
+            seen = set()
+            deduped_emails = []
+            for em in clean_emails:
+                if em not in seen:
+                    seen.add(em)
+                    deduped_emails.append(em)
+
+            if len(deduped_emails) == 0:
+                raise HTTPException(status_code=400, detail="No valid email addresses found in input.")
+
+            user_rows = await conn.fetch(
+                """
+                SELECT user_id, email, username, full_name
+                FROM core.users
+                WHERE LOWER(email) = ANY($1)
+                """,
+                deduped_emails,
+            )
+            found_map = {r["email"].lower(): dict(r) for r in user_rows}
+            target_users = []
+            for em in deduped_emails:
+                if em in found_map:
+                    u = found_map[em]
+                    target_users.append({
+                        "user_id": str(u["user_id"]) if u.get("user_id") else None,
+                        "email": em,
+                        "username": u.get("username"),
+                        "full_name": u.get("full_name")
+                    })
+                else:
+                    target_users.append({
+                        "user_id": None,
+                        "email": em,
+                        "username": None,
+                        "full_name": None
+                    })
+        else:
+            # All existing users who do not already have lifetime plan
+            rows = await conn.fetch(
+                """
+                SELECT user_id, email, username, full_name
+                FROM core.users
+                WHERE plan != 'lifetime'
+                ORDER BY created_at ASC
+                """
+            )
+            target_users = [
+                {
+                    "user_id": str(r["user_id"]) if r.get("user_id") else None,
+                    "email": r["email"],
+                    "username": r.get("username"),
+                    "full_name": r.get("full_name")
+                }
+                for r in rows
+            ]
+
+        generated = await generate_coupons_for_users(conn, target_users, expires_at=expires_at)
+
+    return {
+        "count": len(generated),
+        "expires_at": expires_at.isoformat(),
+        "coupons": generated,
+    }
+
+
+@router.delete("/coupons/{code}", dependencies=[Depends(require_admin_role)])
+async def delete_admin_coupon(code: str):
+    """Delete or revoke an unused coupon code"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "DELETE FROM core.coupons WHERE code = $1 AND is_used = false",
+            code
+        )
+    if res == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Unused coupon not found or already redeemed")
+    return {"status": "success", "message": f"Coupon {code} revoked"}
+
+
+# ============ SUBSCRIPTION & REVENUE ANALYTICS ============
+
+@router.get("/subscriptions", dependencies=[Depends(require_admin_role)])
+async def list_admin_subscriptions(status: Optional[str] = None):
+    """List all user subscriptions with detailed transaction info"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT s.id, s.user_id, s.plan_id, s.status, s.amount_paid,
+                   s.cashfree_order_id, s.cashfree_payment_id,
+                   s.starts_at, s.expires_at, s.created_at,
+                   u.email, u.username, u.full_name, u.plan as current_user_plan,
+                   p.name as plan_name
+            FROM core.subscriptions s
+            LEFT JOIN core.users u ON u.user_id = s.user_id
+            LEFT JOIN core.subscription_plans p ON p.id = s.plan_id
+            ORDER BY s.created_at DESC
+            """
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "user_id": str(r["user_id"]) if r["user_id"] else None,
+            "email": r["email"],
+            "username": r["username"],
+            "full_name": r["full_name"],
+            "plan_id": r["plan_id"],
+            "plan_name": r["plan_name"] or r["plan_id"].capitalize(),
+            "status": r["status"],
+            "amount_paid": float(r["amount_paid"]) if r["amount_paid"] else 0.0,
+            "cashfree_order_id": r["cashfree_order_id"],
+            "cashfree_payment_id": r["cashfree_payment_id"],
+            "current_user_plan": r["current_user_plan"],
+            "starts_at": r["starts_at"].isoformat() if r["starts_at"] else None,
+            "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "is_lifetime": r["expires_at"] is None and r["status"] == "active",
+        }
+        for r in rows
+    ]
+
+
+@router.get("/subscriptions/analytics", dependencies=[Depends(require_admin_role)])
+async def get_subscription_analytics():
+    """
+    Comprehensive subscription and revenue analytics:
+    - Total collection / revenue
+    - Active paid subscriber count & plan distribution
+    - Lifetime VIP breakdown (Paid vs Early Coupon vs Total)
+    - Trial users count
+    - Expiring subscriptions in next 7 days
+    - Coupon redemption metrics
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 1. Total revenue & count by plan
+        rev_rows = await conn.fetch(
+            """
+            SELECT plan_id, COUNT(*) as count, COALESCE(SUM(amount_paid), 0) as revenue
+            FROM core.subscriptions
+            WHERE status = 'active'
+            GROUP BY plan_id
+            """
+        )
+        total_revenue = sum(float(r["revenue"]) for r in rev_rows)
+        active_subscribers_count = sum(r["count"] for r in rev_rows)
+
+        plan_breakdown = {r["plan_id"]: {"count": r["count"], "revenue": float(r["revenue"])} for r in rev_rows}
+
+        # 2. Overall Users by current plan
+        user_plan_counts = await conn.fetch(
+            """
+            SELECT plan, COUNT(*) as count
+            FROM core.users
+            GROUP BY plan
+            """
+        )
+        user_plans = {r["plan"]: r["count"] for r in user_plan_counts}
+
+        # 3. Lifetime VIP Breakdown: Paid vs Early Coupon vs Total
+        lifetime_total_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM core.users WHERE plan = 'lifetime'"
+        ) or 0
+
+        lifetime_paid_row = await conn.fetchrow(
+            """
+            SELECT COUNT(DISTINCT user_id) as count, COALESCE(SUM(amount_paid), 0) as revenue
+            FROM core.subscriptions
+            WHERE plan_id = 'lifetime' AND status = 'active' AND amount_paid > 0
+            """
+        )
+        lifetime_paid_count = lifetime_paid_row["count"] if lifetime_paid_row else 0
+        lifetime_paid_revenue = float(lifetime_paid_row["revenue"]) if lifetime_paid_row else 0.0
+
+        lifetime_coupon_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM core.coupons WHERE is_used = TRUE"
+        ) or 0
+
+        unredeemed_coupons_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM core.coupons WHERE is_used = FALSE AND (expires_at IS NULL OR expires_at > NOW())"
+        ) or 0
+
+        # 4. Active Trials count
+        trials_count = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM core.users
+            WHERE trial_expires_at > NOW() AND plan = 'free'
+            """
+        )
+
+        # 5. Expiring soon in next 7 days
+        expiring_soon_count = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM core.subscriptions
+            WHERE status = 'active'
+              AND expires_at IS NOT NULL
+              AND expires_at > NOW()
+              AND expires_at <= NOW() + INTERVAL '7 days'
+            """
+        )
+
+        # 6. Coupon Metrics
+        coupon_stats = await conn.fetchrow(
+            """
+            SELECT 
+                COUNT(*) as total_coupons,
+                COUNT(*) FILTER (WHERE is_used = true) as redeemed_coupons,
+                COUNT(*) FILTER (WHERE is_used = false AND (expires_at IS NULL OR expires_at > NOW())) as active_coupons,
+                COUNT(*) FILTER (WHERE is_used = false AND expires_at <= NOW()) as expired_coupons
+            FROM core.coupons
+            """
+        )
+
+        # 7. Recent successful payments (Last 10)
+        recent_txs = await conn.fetch(
+            """
+            SELECT s.id, s.amount_paid, s.plan_id, s.cashfree_order_id, s.created_at,
+                   u.email, u.username
+            FROM core.subscriptions s
+            LEFT JOIN core.users u ON u.user_id = s.user_id
+            WHERE s.status = 'active'
+            ORDER BY s.created_at DESC
+            LIMIT 10
+            """
+        )
+
+    return {
+        "overview": {
+            "total_revenue": total_revenue,
+            "active_subscribers": active_subscribers_count,
+            "active_trials": trials_count or 0,
+            "expiring_soon": expiring_soon_count or 0,
+            "total_registered_users": sum(user_plans.values()),
+        },
+        "lifetime_metrics": {
+            "total_lifetime_members": lifetime_total_count,
+            "paid_lifetime_count": lifetime_paid_count,
+            "paid_lifetime_revenue": lifetime_paid_revenue,
+            "coupon_redeemed_count": lifetime_coupon_count,
+            "unredeemed_coupons_count": unredeemed_coupons_count,
+        },
+        "plan_breakdown": plan_breakdown,
+        "user_plan_distribution": user_plans,
+        "coupon_stats": {
+            "total": coupon_stats["total_coupons"] if coupon_stats else 0,
+            "redeemed": coupon_stats["redeemed_coupons"] if coupon_stats else 0,
+            "active": coupon_stats["active_coupons"] if coupon_stats else 0,
+            "expired": coupon_stats["expired_coupons"] if coupon_stats else 0,
+        },
+        "recent_transactions": [
+            {
+                "id": str(r["id"]),
+                "amount": float(r["amount_paid"]) if r["amount_paid"] else 0.0,
+                "plan_id": r["plan_id"],
+                "order_id": r["cashfree_order_id"],
+                "email": r["email"],
+                "username": r["username"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in recent_txs
+        ],
+    }
+
+
+class GrantSubscriptionRequest(BaseModel):
+    email: str
+    plan_id: str  # 'monthly' | 'yearly' | 'lifetime' | 'free'
+    duration_days: Optional[int] = None  # If None, defaults to standard plan duration (30/365/forever)
+    reason: Optional[str] = None  # recorded in the audit trail
+    allow_downgrade: bool = False  # must be true to replace a higher plan with a lower one
+
+
+@router.post("/subscriptions/grant", dependencies=[Depends(require_admin_role)])
+async def grant_admin_subscription(payload: GrantSubscriptionRequest, request: Request):
+    """
+    Manually grant, change or REVOKE a plan for a user (customer support / admin upgrades).
+    - plan_id 'free' revokes every paid subscription the user has and ends any live trial.
+    - Granting a plan lower than the one the user holds is refused unless allow_downgrade is true.
+    - Every grant records who made it (granted_by) for the audit trail.
+    """
+    pool = await get_pool()
+    from datetime import datetime, timezone, timedelta
+    import uuid
+    from app.payments.subscription_service import (
+        PLAN_DURATIONS,
+        PLAN_RANK,
+        revoke_user_subscriptions,
+        _live_paid_plan as live_paid_plan,
+    )
+
+    staff = getattr(request.state, "staff", None) or {}
+    actor = staff.get("email") or staff.get("staff_id") or "unknown"
+    note = f" — {payload.reason.strip()}" if payload.reason and payload.reason.strip() else ""
+
+    email_clean = payload.email.lower().strip()
+    plan_id = payload.plan_id.lower().strip()
+
+    if plan_id not in ("free", "monthly", "yearly", "lifetime"):
+        raise HTTPException(status_code=400, detail="Invalid plan_id. Must be 'free', 'monthly', 'yearly', or 'lifetime'.")
+    if payload.duration_days is not None and not (1 <= payload.duration_days <= 3650):
+        raise HTTPException(status_code=400, detail="duration_days must be between 1 and 3650.")
+
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT user_id, email, username, full_name, plan FROM core.users WHERE LOWER(email) = $1",
+            email_clean,
+        )
+        if not user:
+            raise HTTPException(status_code=404, detail=f"User with email '{email_clean}' not found.")
+
+        user_id = user["user_id"]
+        now = datetime.now(timezone.utc)
+
+        async with conn.transaction():
+            current = await conn.fetchrow(
+                "SELECT plan, plan_expires_at FROM core.users WHERE user_id = $1 FOR UPDATE",
+                user_id,
+            )
+            live = live_paid_plan(current["plan"], current["plan_expires_at"], now)
+
+            if plan_id == "free":
+                revoked = await revoke_user_subscriptions(conn, user_id, f"Revoked by {actor}{note}")
+                await conn.execute(
+                    """
+                    UPDATE core.users
+                    SET trial_expires_at = CASE WHEN trial_expires_at IS NOT NULL AND trial_expires_at > $1
+                                                THEN $1 ELSE trial_expires_at END
+                    WHERE user_id = $2
+                    """,
+                    now, user_id,
+                )
+                return {
+                    "status": "success",
+                    "email": email_clean,
+                    "plan_granted": "free",
+                    "subscriptions_revoked": revoked,
+                    "expires_at": None,
+                }
+
+            if live and PLAN_RANK[plan_id] < PLAN_RANK[live]:
+                if not payload.allow_downgrade:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"User currently holds the higher plan '{live}'. Set allow_downgrade=true to replace it.",
+                    )
+                await revoke_user_subscriptions(conn, user_id, f"Replaced by lower plan grant from {actor}{note}")
+
+            if plan_id == "lifetime":
+                plan_expires_at = None
+            else:
+                days = payload.duration_days or PLAN_DURATIONS.get(plan_id, 30)
+                plan_expires_at = now + timedelta(days=days)
+
+            await conn.execute(
+                """
+                UPDATE core.users
+                SET plan = $1,
+                    plan_expires_at = $2,
+                    trial_expires_at = CASE WHEN trial_expires_at IS NOT NULL AND trial_expires_at > $3
+                                            THEN $3 ELSE trial_expires_at END
+                WHERE user_id = $4
+                """,
+                plan_id, plan_expires_at, now, user_id,
+            )
+
+            order_id = f"manual_grant_{uuid.uuid4().hex[:12]}"
+            await conn.execute(
+                """
+                INSERT INTO core.subscriptions
+                    (user_id, plan_id, status, cashfree_order_id, starts_at, expires_at, amount_paid, granted_by)
+                VALUES ($1, $2, 'active', $3, NOW(), $4, 0.0, $5)
+                """,
+                user_id, plan_id, order_id, plan_expires_at, f"{actor}{note}",
+            )
+
+    return {
+        "status": "success",
+        "email": email_clean,
+        "plan_granted": plan_id,
+        "expires_at": plan_expires_at.isoformat() if plan_expires_at else None,
+        "granted_by": actor,
+    }

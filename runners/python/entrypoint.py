@@ -55,9 +55,11 @@ def run_dataframe(code, data_payload):
                 table_data = json.loads(table_data)
             cols = [c["name"] if isinstance(c, dict) else c for c in table_data["columns"]]
             rows = table_data["rows"]
-            df = pd.DataFrame(rows, columns=cols)
-            global_namespace[f"{table_name}_df"] = df
-            global_namespace[table_name] = df
+            table_df = pd.DataFrame(rows, columns=cols)
+            global_namespace[f"{table_name}_df"] = table_df
+            global_namespace[table_name] = table_df
+            if "df" not in global_namespace:
+                global_namespace["df"] = table_df
 
         exec(code, global_namespace)
 

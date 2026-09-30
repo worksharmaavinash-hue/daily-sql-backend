@@ -1,5 +1,5 @@
 from uuid import uuid4
-from datetime import date
+from app.timeutil import app_today
 
 async def record_attempt(
     conn,
@@ -18,7 +18,7 @@ async def record_attempt(
         uuid4(),
         user_id,
         problem_id,
-        date.today(),
+        app_today(),
         status,
         execution_time_ms,
         challenge_type,

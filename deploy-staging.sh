@@ -6,7 +6,7 @@ echo "🚀 Deploying DailySQL Test Environment..."
 
 # 1. Pull latest python-dsa changes
 echo "📥 Pulling latest code from sql-dialect branch..."
-git pull origin sql-dialect
+git pull origin payment-integration 
 
 # 2. Rebuild & Restart Containers from Staging Compose File
 echo "🐳 Rebuilding staging containers..."

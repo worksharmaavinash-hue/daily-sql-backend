@@ -84,6 +84,8 @@ services:
     container_name: dailysql_pyspark_runner_prod
     image: dailysql-pyspark-runner:latest
     restart: always
+    environment:
+      - JAVA_TOOL_OPTIONS=-Xmx768m
     deploy:
       resources:
         limits:

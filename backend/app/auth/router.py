@@ -5,7 +5,7 @@ from typing import Optional
 import asyncpg
 import httpx
 from authlib.integrations.starlette_client import OAuth
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import RedirectResponse
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from passlib.context import CryptContext
@@ -15,6 +15,7 @@ from app.auth.jwt import create_access_token, verify_admin_jwt
 from app.db import get_pool
 from app.auth.otp_handler import create_otp_session, verify_otp_session
 from app.services.mail_service import send_otp_email
+from app.rate_limit.limiter import rate_limit_auth
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -89,14 +90,17 @@ def _verify_password(plain: str, hashed: str) -> bool:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/register")
-async def register(data: RegisterRequest):
+async def register(data: RegisterRequest, request: Request):
     """
     Step 1 of Signup: Check if email exists and send OTP.
     Does NOT create the user yet.
     """
+    # Rate limit: 5 OTP requests per email per 10 minutes
+    await rate_limit_auth(f"otp:{data.email.lower()}", limit=5, window=600)
+
     pool = await get_pool()
     async with pool.acquire() as conn:
-        existing = await conn.fetchrow("SELECT user_id FROM core.users WHERE email = $1", data.email)
+        existing = await conn.fetchrow("SELECT user_id FROM core.users WHERE LOWER(email) = LOWER($1)", data.email)
         if existing:
             raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
@@ -140,7 +144,11 @@ async def register_verify(data: RegisterVerifyRequest):
     user_id = str(uuid.uuid4())
     hashed = _hash_password(data.password)
 
+    from app.payments.subscription_service import apply_new_user_trial
+
     async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT 1 FROM core.users WHERE LOWER(email) = LOWER($1)", data.email):
+            raise HTTPException(status_code=409, detail="An account with this email already exists.")
         try:
             await conn.execute(
                 """
@@ -151,6 +159,8 @@ async def register_verify(data: RegisterVerifyRequest):
                 data.email,
                 hashed,
             )
+            # If launch trial is active, automatically give new user a 7-day trial
+            await apply_new_user_trial(conn, user_id)
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
@@ -159,13 +169,21 @@ async def register_verify(data: RegisterVerifyRequest):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(data: LoginRequest):
+async def login(data: LoginRequest, request: Request):
     """Authenticate with email and password, return JWT."""
+    # Rate limit: 10 login attempts per email per 5 minutes
+    await rate_limit_auth(f"login:{data.email.lower()}", limit=10, window=300)
+
     pool = await get_pool()
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT user_id, hashed_password FROM core.users WHERE email = $1 AND auth_provider = 'email'",
+            """
+            SELECT user_id, email, hashed_password FROM core.users
+            WHERE LOWER(email) = LOWER($1) AND auth_provider = 'email'
+            ORDER BY (email = $1) DESC, created_at ASC
+            LIMIT 1
+            """,
             data.email,
         )
 
@@ -175,7 +193,7 @@ async def login(data: LoginRequest):
     if not _verify_password(data.password, row["hashed_password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = create_access_token(str(row["user_id"]), data.email)
+    token = create_access_token(str(row["user_id"]), row["email"])
     return TokenResponse(access_token=token)
 
 
@@ -253,25 +271,32 @@ async def google_callback(code: Optional[str] = None, state: Optional[str] = Non
     if not email or not google_sub:
         return RedirectResponse(f"{FRONTEND_URL}/login?error=missing_profile")
 
+    # An unverified Google email must never be trusted: it could be a stranger's address,
+    # and we link accounts (and check coupon ownership) by email.
+    if userinfo.get("email_verified") not in (True, "true", "True"):
+        return RedirectResponse(f"{FRONTEND_URL}/login?error=email_not_verified")
+    email = email.strip().lower()
+
     pool = await get_pool()
+    from app.payments.subscription_service import apply_new_user_trial
 
     async with pool.acquire() as conn:
         # Check if a user with this email already exists (any provider)
         existing = await conn.fetchrow(
-            "SELECT user_id FROM core.users WHERE email = $1",
+            "SELECT user_id, provider_id FROM core.users WHERE LOWER(email) = $1 ORDER BY created_at ASC LIMIT 1",
             email,
         )
 
         if existing:
-            # Link Google to the existing account (email/password user logging in with Google)
+            if existing["provider_id"] and existing["provider_id"] != google_sub:
+                # this email is already tied to a DIFFERENT Google identity: refuse to merge them
+                return RedirectResponse(f"{FRONTEND_URL}/login?error=account_conflict")
+            # Link Google to the existing account. auth_provider is left alone so an
+            # email/password user can still sign in with their password afterwards.
             await conn.execute(
-                """
-                UPDATE core.users
-                SET auth_provider = 'google', provider_id = $1
-                WHERE email = $2
-                """,
+                "UPDATE core.users SET provider_id = COALESCE(provider_id, $1) WHERE user_id = $2",
                 google_sub,
-                email,
+                existing["user_id"],
             )
             user_id = str(existing["user_id"])
         else:
@@ -287,6 +312,8 @@ async def google_callback(code: Optional[str] = None, state: Optional[str] = Non
                 google_sub,
                 full_name,
             )
+            # Apply launch trial if active
+            await apply_new_user_trial(conn, user_id)
 
     jwt_token = create_access_token(user_id, email)
 
