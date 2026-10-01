@@ -1338,7 +1338,9 @@ async def list_admin_users():
             SELECT 
                 u.user_id, u.email, u.full_name, u.whatsapp_number, u.source, 
                 u.occupation, u.job_role, u.experience_years, u.created_at, u.onboarding_completed,
+                u.plan, u.plan_expires_at, u.trial_expires_at, u.trial_type,
                 MAX(a.created_at) as last_active_at,
+                COUNT(a.*) as total_attempts,
                 COUNT(DISTINCT CASE WHEN a.status = 'correct' THEN a.problem_id END) as total_solved
             FROM core.users u
             LEFT JOIN core.attempts a ON u.user_id = a.user_id
@@ -1346,11 +1348,28 @@ async def list_admin_users():
             ORDER BY u.created_at DESC
             """
         )
+    from datetime import datetime, timezone
+    from app.payments.subscription_service import _live_paid_plan
+    now = datetime.now(timezone.utc)
+
+    def _access(r):
+        live = _live_paid_plan(r["plan"] or "free", r["plan_expires_at"], now)
+        if live:
+            return live, "paid"
+        if r["trial_expires_at"] is not None and r["trial_expires_at"] > now:
+            return "free", "trial"
+        return "free", "free"
+
     return [
         {
             "user_id": str(r["user_id"]),
             "email": r["email"],
             "full_name": r["full_name"],
+            "plan": _access(r)[0],
+            "access": _access(r)[1],
+            "plan_expires_at": r["plan_expires_at"].isoformat() if r["plan_expires_at"] else None,
+            "trial_type": r["trial_type"],
+            "trial_expires_at": r["trial_expires_at"].isoformat() if r["trial_expires_at"] else None,
             "whatsapp_number": r["whatsapp_number"],
             "source": r["source"],
             "occupation": r["occupation"],
@@ -1359,7 +1378,8 @@ async def list_admin_users():
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             "onboarding_completed": r["onboarding_completed"],
             "last_active_at": r["last_active_at"].isoformat() if r["last_active_at"] else None,
-            "total_solved": r["total_solved"]
+            "total_solved": r["total_solved"],
+            "total_attempts": r["total_attempts"],
         }
         for r in rows
     ]

@@ -87,6 +87,13 @@ def _extract_order_id(data: dict) -> Optional[str]:
 # ─── Pydantic models ─────────────────────────────────────────────────────────
 class CreateOrderRequest(BaseModel):
     plan_id: str
+    customer_phone: Optional[str] = None   # billing phone entered at checkout when none is on file
+
+
+def _clean_phone(raw: Optional[str]) -> Optional[str]:
+    """Last 10 digits of a phone number, or None if it isn't a usable number (e.g. "@handle", "joined_via_link")."""
+    digits = "".join(c for c in (raw or "") if c.isdigit())
+    return digits[-10:] if len(digits) >= 10 else None
 
 
 class CancelRequest(BaseModel):
@@ -118,19 +125,31 @@ async def create_order(
     async with pool.acquire() as conn:
         # Fetch user details for Cashfree
         db_user = await conn.fetchrow(
-            "SELECT full_name, email, whatsapp_number FROM core.users WHERE user_id = $1",
+            "SELECT full_name, email, whatsapp_number, phone_number FROM core.users WHERE user_id = $1",
             user_id,
         )
         customer_name = (db_user["full_name"] if db_user and db_user["full_name"] else "Daily SQL User")
         customer_email = (db_user["email"] if db_user and db_user["email"] else user_email)
 
-        # Cashfree requires customer_phone on every order. Use the real number when the user gave
-        # one during onboarding (keep only the last 10 digits, so "+91 99999 99999" or "91999..."
-        # both normalise the same way); fall back to a placeholder otherwise — Cashfree's checkout
-        # lets the customer correct it inline, so this never blocks a real payment either way.
-        raw_phone = (db_user["whatsapp_number"] if db_user else None) or ""
-        digits = "".join(c for c in raw_phone if c.isdigit())
-        customer_phone = digits[-10:] if len(digits) >= 10 else "9999999999"
+        # Cashfree requires customer_phone on every order. Prefer a number typed at checkout, then the
+        # saved billing phone, then the onboarding WhatsApp number (which may be an @handle or
+        # "joined_via_link" and so not a phone at all). With no usable number we ask the user for one
+        # instead of sending a fake placeholder.
+        customer_phone = (
+            _clean_phone(payload.customer_phone)
+            or _clean_phone(db_user["phone_number"] if db_user else None)
+            or _clean_phone(db_user["whatsapp_number"] if db_user else None)
+        )
+        if not customer_phone:
+            raise HTTPException(
+                status_code=400,
+                detail="phone_required" if not payload.customer_phone else "invalid_phone",
+            )
+        if _clean_phone(payload.customer_phone):
+            await conn.execute(
+                "UPDATE core.users SET phone_number = $1 WHERE user_id = $2",
+                customer_phone, user_id,
+            )
 
         # Trial users may buy, the same plan renews and a higher plan upgrades. Only a Lifetime holder,
         # or buying a plan lower than the one already held, is refused.

@@ -45,6 +45,8 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS staff_users_active_idx ON core.staff_users (is_active);
             """)
 
+            await conn.execute("ALTER TABLE core.users ADD COLUMN IF NOT EXISTS phone_number TEXT")
+
             # 2. Auto-seed default superadmin if no staff exist
             count = await conn.fetchval("SELECT COUNT(*) FROM core.staff_users")
             if count == 0:

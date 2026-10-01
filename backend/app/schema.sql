@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS core.users (
     job_role TEXT,
     experience_years INTEGER,
     whatsapp_number TEXT,
+    phone_number TEXT,
     source TEXT,
     avatar_url TEXT,
     onboarding_completed BOOLEAN DEFAULT FALSE,
