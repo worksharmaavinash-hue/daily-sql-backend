@@ -71,6 +71,35 @@ async def lifespan(app: FastAPI):
             print("[Startup] Stale subscriptions swept.")
     except Exception as e:
         print(f"[Startup] Startup initialization notice: {e}")
+
+    # Pricing columns/audit table (idempotent; safe to run on every start)
+    try:
+        from app.db import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                ALTER TABLE core.subscription_plans ADD COLUMN IF NOT EXISTS original_price_inr NUMERIC(10,2);
+                ALTER TABLE core.subscription_plans ADD COLUMN IF NOT EXISTS sort_order INTEGER;
+                ALTER TABLE core.subscriptions ADD COLUMN IF NOT EXISTS expected_amount NUMERIC(10,2);
+                CREATE TABLE IF NOT EXISTS core.plan_price_audit (
+                    id BIGSERIAL PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    old_price NUMERIC(10,2),
+                    new_price NUMERIC(10,2),
+                    old_original_price NUMERIC(10,2),
+                    new_original_price NUMERIC(10,2),
+                    old_is_active BOOLEAN,
+                    new_is_active BOOLEAN,
+                    changed_by TEXT,
+                    changed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+                UPDATE core.subscription_plans SET sort_order = CASE id WHEN 'monthly' THEN 1 WHEN 'yearly' THEN 2 WHEN 'lifetime' THEN 3 END
+                    WHERE sort_order IS NULL;
+                UPDATE core.subscription_plans SET original_price_inr = CASE id WHEN 'monthly' THEN 1299 WHEN 'yearly' THEN 3499 WHEN 'lifetime' THEN 9999 END
+                    WHERE original_price_inr IS NULL;
+            """)
+    except Exception as e:
+        print(f"[Startup] Pricing migration notice: {e}")
     yield   # App runs here
 
 

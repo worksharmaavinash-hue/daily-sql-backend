@@ -29,8 +29,63 @@ def _compute_expires_at(plan_id: str) -> Optional[datetime]:
 
 PLAN_RANK: dict[str, int] = {"free": 0, "monthly": 1, "yearly": 2, "lifetime": 3}
 
-# Single source of truth for what each plan costs (used to create AND to verify orders)
+# FALLBACK ONLY. The live prices are in core.subscription_plans (editable from the CMS); these values
+# are used only if a plan row is missing from the database.
 PLAN_PRICES: dict[str, float] = {"monthly": 899.00, "yearly": 1499.00, "lifetime": 4999.00}
+
+_PLANS_TTL_SECONDS = 30
+_plans_cache: dict = {"at": 0.0, "data": None}
+
+
+def invalidate_plans_cache() -> None:
+    _plans_cache["at"] = 0.0
+    _plans_cache["data"] = None
+
+
+async def get_plans(conn, *, use_cache: bool = True, only_active: bool = True) -> dict:
+    """
+    Plan catalogue from core.subscription_plans, keyed by plan id:
+    {id: {id, name, price, original_price, duration_days, features, sort_order, is_active}}.
+    Anything that charges money must call this with use_cache=False.
+    """
+    import time
+    import json as _json
+    if use_cache and only_active and _plans_cache["data"] is not None and time.time() - _plans_cache["at"] < _PLANS_TTL_SECONDS:
+        return _plans_cache["data"]
+    rows = await conn.fetch(
+        """
+        SELECT id, name, price_inr, original_price_inr, duration_days, features, sort_order, is_active
+        FROM core.subscription_plans
+        ORDER BY sort_order NULLS LAST, price_inr
+        """
+    )
+    plans = {}
+    for r in rows:
+        feats = r["features"]
+        if isinstance(feats, str):
+            feats = _json.loads(feats)
+        plans[r["id"]] = {
+            "id": r["id"],
+            "name": r["name"],
+            "price": float(r["price_inr"]),
+            "original_price": float(r["original_price_inr"]) if r["original_price_inr"] is not None else None,
+            "duration_days": r["duration_days"],
+            "features": feats or [],
+            "sort_order": r["sort_order"],
+            "is_active": bool(r["is_active"]),
+        }
+    if only_active:
+        plans = {k: v for k, v in plans.items() if v["is_active"]}
+        _plans_cache["at"], _plans_cache["data"] = time.time(), plans
+    return plans
+
+
+async def get_plan_price(conn, plan_id: str) -> Optional[float]:
+    """Current charge for a plan (always read fresh from the DB), falling back to the built-in default."""
+    price = await conn.fetchval("SELECT price_inr FROM core.subscription_plans WHERE id = $1", plan_id)
+    if price is not None:
+        return float(price)
+    return PLAN_PRICES.get(plan_id)
 
 
 def _live_paid_plan(plan: Optional[str], plan_expires_at: Optional[datetime], now: datetime) -> Optional[str]:
@@ -78,13 +133,14 @@ async def create_pending_subscription(
     user_id: str,
     plan_id: str,
     cashfree_order_id: str,
+    expected_amount: Optional[float] = None,
 ) -> str:
-    """Insert a pending subscription row and return its UUID."""
+    """Insert a pending subscription row (remembering the amount we asked Cashfree to charge) and return its UUID."""
     row = await conn.fetchrow(
         """
         INSERT INTO core.subscriptions
-            (user_id, plan_id, status, cashfree_order_id)
-        VALUES ($1, $2, 'pending', $3)
+            (user_id, plan_id, status, cashfree_order_id, expected_amount)
+        VALUES ($1, $2, 'pending', $3, $4)
         ON CONFLICT (cashfree_order_id) DO UPDATE
             SET updated_at = NOW()
         RETURNING id
@@ -92,6 +148,7 @@ async def create_pending_subscription(
         user_id,
         plan_id,
         cashfree_order_id,
+        expected_amount,
     )
     return str(row["id"])
 
@@ -117,14 +174,14 @@ async def activate_subscription(
       trial is running (no paid plan yet) stacks it on top of the trial's remaining time instead, so
       the paid period starts after the trial would have ended rather than overwriting it.
     - A live trial is ended (its history is kept) because the user is now on a paid plan.
-    - ``order_amount`` (what we asked Cashfree to charge) must match the plan's price.
+    - ``order_amount`` (what we asked Cashfree to charge) must match the amount stored when the order was created.
 
     Returns None if the order does not exist, otherwise a dict that includes ``activated`` (bool).
     """
     async with conn.transaction():
         existing = await conn.fetchrow(
             """
-            SELECT id, user_id, plan_id, status
+            SELECT id, user_id, plan_id, status, expected_amount
             FROM core.subscriptions
             WHERE cashfree_order_id = $1
             """,
@@ -135,7 +192,11 @@ async def activate_subscription(
 
         claimed = None
         if existing["status"] in ("pending", "failed"):
-            expected = PLAN_PRICES.get(existing["plan_id"])
+            # What this order was created for; older pending rows (no stored amount) use the current price.
+            expected = (
+                float(existing["expected_amount"]) if existing["expected_amount"] is not None
+                else await get_plan_price(conn, existing["plan_id"])
+            )
             if order_amount is not None and expected is not None and abs(float(order_amount) - expected) > 0.5:
                 return {**_sub_summary(existing), "activated": False, "reason": "amount_mismatch"}
             claimed = await conn.fetchrow(

@@ -21,7 +21,8 @@ from typing import Optional
 from app.auth.jwt import verify_jwt, verify_jwt_optional
 from app.db import get_pool
 from app.payments.subscription_service import (
-    PLAN_PRICES,
+    get_plans,
+    get_plan_price,
     create_pending_subscription,
     activate_subscription,
     get_active_subscription,
@@ -56,11 +57,7 @@ CASHFREE_HEADERS = {
     "Content-Type": "application/json",
 }
 
-PLAN_DETAILS = {
-    "monthly":  {"name": "Monthly Plan",  "amount": PLAN_PRICES["monthly"]},
-    "yearly":   {"name": "Yearly Plan",   "amount": PLAN_PRICES["yearly"]},
-    "lifetime": {"name": "Lifetime Plan", "amount": PLAN_PRICES["lifetime"]},
-}
+VALID_PLAN_IDS = ("monthly", "yearly", "lifetime")
 
 # Orders created by create_order() look like dsql_<plan>_<10 hex chars>. Anything else (coupon / manual-grant
 # reference numbers, or attacker-supplied text) is never sent to Cashfree.
@@ -110,19 +107,24 @@ async def create_order(
     Creates a Cashfree payment order and a pending subscription record in DB.
     Returns payment_session_id for the frontend to open the checkout modal.
     """
-    if payload.plan_id not in PLAN_DETAILS:
+    if payload.plan_id not in VALID_PLAN_IDS:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid plan_id. Must be one of: {list(PLAN_DETAILS.keys())}",
+            detail=f"Invalid plan_id. Must be one of: {list(VALID_PLAN_IDS)}",
         )
 
-    plan = PLAN_DETAILS[payload.plan_id]
     order_id = f"dsql_{payload.plan_id}_{uuid.uuid4().hex[:10]}"
     user_id = user["user_id"]
     user_email = user.get("email", "user@dailysql.in")
 
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # Price comes from the database (fresh read, never cached) so a CMS price change applies at once
+        plans_now = await get_plans(conn, use_cache=False)
+        if payload.plan_id not in plans_now:
+            raise HTTPException(status_code=400, detail="This plan is not available right now.")
+        plan = {"name": plans_now[payload.plan_id]["name"], "amount": plans_now[payload.plan_id]["price"]}
+
         # Fetch user details for Cashfree
         db_user = await conn.fetchrow(
             "SELECT full_name, email, whatsapp_number, phone_number FROM core.users WHERE user_id = $1",
@@ -198,7 +200,7 @@ async def create_order(
                 raise HTTPException(status_code=502, detail=f"Cashfree unavailable: {exc}")
 
         # Store pending subscription in DB
-        await create_pending_subscription(conn, user_id, payload.plan_id, order_id)
+        await create_pending_subscription(conn, user_id, payload.plan_id, order_id, plan["amount"])
         CHECKOUT_INITIATED.labels(plan_id=payload.plan_id).inc()
 
     return {
@@ -286,12 +288,14 @@ async def cashfree_webhook(request: Request):
             refunded = float(refund.get("refund_amount") or 0)
             async with pool.acquire() as conn:
                 sub = await conn.fetchrow(
-                    "SELECT plan_id, amount_paid FROM core.subscriptions WHERE cashfree_order_id = $1",
+                    "SELECT plan_id, amount_paid, expected_amount FROM core.subscriptions WHERE cashfree_order_id = $1",
                     order_id,
                 )
                 paid = float(sub["amount_paid"] or 0) if sub else 0.0
                 if sub and paid <= 0:
-                    paid = PLAN_PRICES.get(sub["plan_id"], 0.0)
+                    paid = float(sub["expected_amount"]) if sub["expected_amount"] is not None else (
+                        await get_plan_price(conn, sub["plan_id"]) or 0.0
+                    )
                 if sub and refunded >= paid - 0.01:
                     revoked = await revoke_subscription(
                         conn, order_id, "refunded", reason="Full refund via Cashfree", refunded_amount=refunded,
@@ -417,13 +421,25 @@ async def my_subscription(user: dict = Depends(verify_jwt)):
     async with pool.acquire() as conn:
         status_info = await get_user_full_access_status(conn, user["user_id"])
         sub = await get_active_subscription(conn, user["user_id"])
+        plans_now = await get_plans(conn)
 
     plan = status_info["plan"]
+    details = plans_now.get(plan) if plan != "free" else None
     return {
         **status_info,
         "subscription": sub,
-        "plan_details": PLAN_DETAILS.get(plan) if plan != "free" else None,
+        "plan_details": {"name": details["name"], "amount": details["price"]} if details else None,
     }
+
+
+# ─── Public plan catalogue ───────────────────────────────────────────────────
+@router.get("/plans")
+async def list_plans():
+    """Active plans with their current INR prices - what the pricing and payment pages render."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        plans_now = await get_plans(conn)
+    return {"currency": "INR", "plans": list(plans_now.values())}
 
 
 

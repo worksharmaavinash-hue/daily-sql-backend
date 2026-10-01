@@ -40,10 +40,7 @@ VALUES
     ('monthly',  'Monthly Plan',  899.00,  30,   '["Full access to all questions", "All challenge types", "Priority support"]'::jsonb),
     ('yearly',   'Yearly Plan',   1499.00, 365,  '["Full access to all questions", "All challenge types", "Priority support", "Best value"]'::jsonb),
     ('lifetime', 'Lifetime Plan', 4999.00, NULL, '["Full access to all questions", "All challenge types", "VIP support", "All future content"]'::jsonb)
-ON CONFLICT (id) DO UPDATE SET
-    price_inr = EXCLUDED.price_inr,
-    duration_days = EXCLUDED.duration_days,
-    features = EXCLUDED.features;
+ON CONFLICT (id) DO NOTHING;  -- never overwrite prices edited from the CMS
 
 -- 4. Subscriptions table
 CREATE TABLE IF NOT EXISTS core.subscriptions (

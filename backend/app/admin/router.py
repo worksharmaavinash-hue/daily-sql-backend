@@ -1442,6 +1442,107 @@ async def remove_wa_group_member(user_id: str):
     return {"status": "removed"}
 
 
+# ============ PLAN PRICING (CMS) ============
+
+class UpdatePlanRequest(BaseModel):
+    price_inr: Optional[float] = None
+    original_price_inr: Optional[float] = None   # strike-through "was" price; send 0 to clear
+    is_active: Optional[bool] = None
+
+
+@router.get("/plans", dependencies=[Depends(require_admin_role)])
+async def list_admin_plans():
+    """All plans (including inactive) with their current prices."""
+    pool = await get_pool()
+    from app.payments.subscription_service import get_plans
+    async with pool.acquire() as conn:
+        plans = await get_plans(conn, use_cache=False, only_active=False)
+    return list(plans.values())
+
+
+@router.put("/plans/{plan_id}", dependencies=[Depends(require_admin_role)])
+async def update_admin_plan(plan_id: str, payload: UpdatePlanRequest, request: Request):
+    """
+    Change a plan's price / list price / availability. Applies to NEW orders only: orders that are
+    already open keep the amount they were created with.
+    """
+    from app.payments.subscription_service import invalidate_plans_cache
+
+    if plan_id not in ("monthly", "yearly", "lifetime"):
+        raise HTTPException(status_code=404, detail="Unknown plan")
+    if payload.price_inr is not None and not (1 <= payload.price_inr <= 1_000_000):
+        raise HTTPException(status_code=400, detail="price_inr must be between 1 and 1,000,000.")
+    if payload.original_price_inr is not None and payload.original_price_inr < 0:
+        raise HTTPException(status_code=400, detail="original_price_inr cannot be negative.")
+
+    staff = getattr(request.state, "staff", None) or {}
+    actor = staff.get("email") or staff.get("staff_id") or "unknown"
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            old = await conn.fetchrow(
+                "SELECT price_inr, original_price_inr, is_active FROM core.subscription_plans WHERE id = $1 FOR UPDATE",
+                plan_id,
+            )
+            if not old:
+                raise HTTPException(status_code=404, detail="Plan not found")
+
+            new_price = payload.price_inr if payload.price_inr is not None else old["price_inr"]
+            if payload.original_price_inr is None:
+                new_original = old["original_price_inr"]
+            else:
+                new_original = payload.original_price_inr or None   # 0 clears it
+            new_active = payload.is_active if payload.is_active is not None else old["is_active"]
+
+            if new_original is not None and float(new_original) < float(new_price):
+                raise HTTPException(status_code=400, detail="The list (strike-through) price cannot be lower than the price.")
+
+            await conn.execute(
+                "UPDATE core.subscription_plans SET price_inr = $1, original_price_inr = $2, is_active = $3 WHERE id = $4",
+                new_price, new_original, new_active, plan_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO core.plan_price_audit
+                    (plan_id, old_price, new_price, old_original_price, new_original_price, old_is_active, new_is_active, changed_by)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                plan_id, old["price_inr"], new_price, old["original_price_inr"], new_original,
+                old["is_active"], new_active, actor,
+            )
+    invalidate_plans_cache()
+    return {
+        "status": "success",
+        "plan_id": plan_id,
+        "price_inr": float(new_price),
+        "original_price_inr": float(new_original) if new_original is not None else None,
+        "is_active": bool(new_active),
+    }
+
+
+@router.get("/plans/audit", dependencies=[Depends(require_admin_role)])
+async def plan_price_audit():
+    """Last 50 plan price changes."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM core.plan_price_audit ORDER BY changed_at DESC LIMIT 50"
+        )
+    return [
+        {
+            "plan_id": r["plan_id"],
+            "old_price": float(r["old_price"]) if r["old_price"] is not None else None,
+            "new_price": float(r["new_price"]) if r["new_price"] is not None else None,
+            "old_is_active": r["old_is_active"],
+            "new_is_active": r["new_is_active"],
+            "changed_by": r["changed_by"],
+            "changed_at": r["changed_at"].isoformat() if r["changed_at"] else None,
+        }
+        for r in rows
+    ]
+
+
 # ============ LAUNCH TRIAL & COUPON ADMIN ENDPOINTS ============
 
 class LaunchConfigRequest(BaseModel):
