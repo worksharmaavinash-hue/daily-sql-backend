@@ -125,9 +125,12 @@ async def x(sql, *a):
 async def new_user(email=None, plan="free", plan_exp=None, trial_exp=None, trial_type=None, created=None, provider="email", provider_id=None):
     uid = str(uuid.uuid4())
     email = email or f"u{uuid.uuid4().hex[:8]}@example.com"
+    # A number on file so create-order's phone_required check (added alongside this test run — see
+    # payments/router.py's customer_phone fallback chain) doesn't block every test that creates an
+    # order. Tests that specifically exercise phone handling override/clear this themselves.
     await x("""INSERT INTO core.users (user_id, email, hashed_password, auth_provider, provider_id, plan, plan_expires_at,
-                                       trial_expires_at, trial_type, created_at, onboarding_completed)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, NOW()), TRUE)""",
+                                       trial_expires_at, trial_type, created_at, onboarding_completed, whatsapp_number)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, NOW()), TRUE, '9876543210')""",
             uid, email, "x", provider, provider_id, plan, plan_exp, trial_exp, trial_type, created)
     return uid, email
 
@@ -155,9 +158,12 @@ def wh_success(oid, amount):
                      "payment": {"cf_payment_id": 777, "payment_amount": amount}}}
 
 
-async def create_order(uid, email, plan):
+async def create_order(uid, email, plan, customer_phone=None):
     cf_reset(amount=PRICE[plan])
-    r = await client.post("/api/payments/create-order", json={"plan_id": plan}, headers=hdr(uid, email))
+    body = {"plan_id": plan}
+    if customer_phone is not None:
+        body["customer_phone"] = customer_phone
+    r = await client.post("/api/payments/create-order", json=body, headers=hdr(uid, email))
     return r
 
 
@@ -196,19 +202,34 @@ async def sweep():
 
 # ══════════════════════════ PAYMENTS: #1 #2 #3 #9 #10 ═══════════════════════════════════════
 async def t_customer_phone():
-    print("\n[#15] Cashfree order carries the customer's real phone number when we have one")
+    print("\n[#15] Cashfree order carries the customer's real phone number — priority chain + required check")
     uid, em = await new_user()
-    await x("UPDATE core.users SET whatsapp_number=$1 WHERE user_id=$2", "+91 98765 43210", uid)
+    await x("UPDATE core.users SET whatsapp_number=$1 WHERE user_id=$2", "+91 98765 43211", uid)
     await order_for(uid, em, "monthly")
-    check("a stored number is sent, normalised to its last 10 digits",
-          CF["last_order_payload"]["customer_details"]["customer_phone"] == "9876543210",
+    check("a stored WhatsApp number is sent, normalised to its last 10 digits",
+          CF["last_order_payload"]["customer_details"]["customer_phone"] == "9876543211",
           CF["last_order_payload"]["customer_details"]["customer_phone"])
 
-    uid, em = await new_user()  # no whatsapp_number on this one
+    uid, em = await new_user()
+    await x("UPDATE core.users SET whatsapp_number='9876543211', phone_number=$1 WHERE user_id=$2", "+91 90000 11111", uid)
     await order_for(uid, em, "monthly")
-    check("no stored number -> falls back to the placeholder (Cashfree requires some value)",
-          CF["last_order_payload"]["customer_details"]["customer_phone"] == "9999999999",
+    check("a saved billing phone_number wins over whatsapp_number",
+          CF["last_order_payload"]["customer_details"]["customer_phone"] == "9000011111",
           CF["last_order_payload"]["customer_details"]["customer_phone"])
+
+    uid, em = await new_user()
+    await x("UPDATE core.users SET whatsapp_number='9876543211', phone_number='9000011111' WHERE user_id=$1", uid)
+    r = await create_order(uid, em, "monthly", customer_phone="98 765-43212")
+    assert r.status_code == 200, (r.status_code, r.text)
+    check("a number typed at checkout wins over everything stored",
+          CF["last_order_payload"]["customer_details"]["customer_phone"] == "9876543212",
+          CF["last_order_payload"]["customer_details"]["customer_phone"])
+
+    uid, em = await new_user()
+    await x("UPDATE core.users SET whatsapp_number=NULL, phone_number=NULL WHERE user_id=$1", uid)
+    r = await create_order(uid, em, "monthly")
+    check("no number anywhere -> 400 phone_required (no more fake placeholder sent to Cashfree)",
+          r.status_code == 400 and r.json().get("detail") == "phone_required", (r.status_code, r.text))
 
 
 async def t_create_order_rules():
