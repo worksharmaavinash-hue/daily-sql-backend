@@ -555,10 +555,10 @@ async def get_public_profile(username: str):
         # Get total problem counts by difficulty
         totals = await conn.fetch(
             """
-            SELECT difficulty, COUNT(*) as total
+            SELECT LOWER(difficulty) as difficulty, COUNT(*) as total
             FROM core.problems
             WHERE is_active = true OR EXISTS (
-                SELECT 1 FROM core.daily_practice 
+                SELECT 1 FROM core.daily_practice
                 WHERE core.problems.id IN (
                     easy_problem_id, medium_problem_id, advanced_problem_id,
                     python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
@@ -567,7 +567,7 @@ async def get_public_profile(username: str):
                 )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
-            GROUP BY difficulty
+            GROUP BY LOWER(difficulty)
             """
         )
 
@@ -579,25 +579,25 @@ async def get_public_profile(username: str):
         }
 
         for r in totals:
-            diff = r["difficulty"].lower()
+            diff = r["difficulty"]
             if diff in stats:
-                stats[diff]["total"] = r["total"]
+                stats[diff]["total"] += r["total"]
 
         rows = await conn.fetch(
             """
-            SELECT p.difficulty, COUNT(DISTINCT us.problem_id) as solved
+            SELECT LOWER(p.difficulty) as difficulty, COUNT(DISTINCT us.problem_id) as solved
             FROM core.user_solutions us
             JOIN core.problems p ON us.problem_id = p.id
             WHERE us.user_id = $1
-            GROUP BY p.difficulty
+            GROUP BY LOWER(p.difficulty)
             """,
             profile["user_id"]
         )
 
         for r in rows:
-            diff = r["difficulty"].lower()
+            diff = r["difficulty"]
             if diff in stats:
-                stats[diff]["solved"] = r["solved"]
+                stats[diff]["solved"] += r["solved"]
                 stats["total_solved"] += r["solved"]
 
         # Get recent submissions
@@ -813,22 +813,22 @@ async def get_my_stats(user=Depends(verify_jwt)):
         # Get count of distinct problems solved by difficulty
         rows = await conn.fetch(
             """
-            SELECT p.difficulty, COUNT(DISTINCT us.problem_id) as solved
+            SELECT LOWER(p.difficulty) as difficulty, COUNT(DISTINCT us.problem_id) as solved
             FROM core.user_solutions us
             JOIN core.problems p ON us.problem_id = p.id
             WHERE us.user_id = $1
-            GROUP BY p.difficulty
+            GROUP BY LOWER(p.difficulty)
             """,
             user_id
         )
-        
+
         # Get total problem counts by difficulty
         totals = await conn.fetch(
             """
-            SELECT difficulty, COUNT(*) as total
+            SELECT LOWER(difficulty) as difficulty, COUNT(*) as total
             FROM core.problems
             WHERE is_active = true OR EXISTS (
-                SELECT 1 FROM core.daily_practice 
+                SELECT 1 FROM core.daily_practice
                 WHERE core.problems.id IN (
                     easy_problem_id, medium_problem_id, advanced_problem_id,
                     python_easy_problem_id, python_medium_problem_id, python_advanced_problem_id,
@@ -837,7 +837,7 @@ async def get_my_stats(user=Depends(verify_jwt)):
                 )
                 AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
             )
-            GROUP BY difficulty
+            GROUP BY LOWER(difficulty)
             """
         )
 
@@ -848,14 +848,14 @@ async def get_my_stats(user=Depends(verify_jwt)):
     }
 
     for r in totals:
-        diff = r["difficulty"].lower()
+        diff = r["difficulty"]
         if diff in stats:
-            stats[diff]["total"] = r["total"]
-            
+            stats[diff]["total"] += r["total"]
+
     for r in rows:
-        diff = r["difficulty"].lower()
+        diff = r["difficulty"]
         if diff in stats:
-            stats[diff]["solved"] = r["solved"]
+            stats[diff]["solved"] += r["solved"]
 
     return stats
 

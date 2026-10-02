@@ -199,6 +199,44 @@ async def init_db():
                 CREATE INDEX IF NOT EXISTS staff_users_role_idx ON core.staff_users (role);
                 CREATE INDEX IF NOT EXISTS staff_users_active_idx ON core.staff_users (is_active);
 
+                -- 10. Columns the "database-driven plan pricing" feature needs. Previously these only
+                -- existed in main.py's startup lifespan, not here — meaning create_tables.py, the one
+                -- script this whole project's deploy process treats as "run this and the schema is
+                -- current", was silently incomplete. Mirrored here so it's authoritative on its own;
+                -- the lifespan copy is now redundant but harmless (ADD COLUMN IF NOT EXISTS).
+                ALTER TABLE core.subscription_plans ADD COLUMN IF NOT EXISTS original_price_inr NUMERIC(10,2);
+                ALTER TABLE core.subscription_plans ADD COLUMN IF NOT EXISTS sort_order INTEGER;
+                ALTER TABLE core.subscriptions ADD COLUMN IF NOT EXISTS expected_amount NUMERIC(10,2);
+                CREATE TABLE IF NOT EXISTS core.plan_price_audit (
+                    id BIGSERIAL PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    old_price NUMERIC(10,2),
+                    new_price NUMERIC(10,2),
+                    old_original_price NUMERIC(10,2),
+                    new_original_price NUMERIC(10,2),
+                    old_is_active BOOLEAN,
+                    new_is_active BOOLEAN,
+                    changed_by TEXT,
+                    changed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+                UPDATE core.subscription_plans SET sort_order = CASE id WHEN 'monthly' THEN 1 WHEN 'yearly' THEN 2 WHEN 'lifetime' THEN 3 END
+                    WHERE sort_order IS NULL;
+                UPDATE core.subscription_plans SET original_price_inr = CASE id WHEN 'monthly' THEN 1299 WHEN 'yearly' THEN 3499 WHEN 'lifetime' THEN 9999 END
+                    WHERE original_price_inr IS NULL;
+
+                -- 11. Normalise core.problems.difficulty to the three canonical values. Historical data
+                -- had a mix of casings ('Easy', 'Medium') and a different word entirely ('Hard' instead
+                -- of 'advanced'), which every difficulty-grouped stats query (profile, public profile)
+                -- silently undercounted or dropped, since GROUP BY is case-sensitive and those problems
+                -- never matched any recognised bucket. The admin UI only ever sends lowercase values, so
+                -- this is a one-time cleanup of older/imported rows, not an ongoing source.
+                UPDATE core.problems SET difficulty = 'advanced' WHERE LOWER(difficulty) = 'hard';
+                UPDATE core.problems SET difficulty = LOWER(difficulty) WHERE difficulty <> LOWER(difficulty);
+
+                ALTER TABLE core.problems DROP CONSTRAINT IF EXISTS problems_difficulty_check;
+                ALTER TABLE core.problems ADD CONSTRAINT problems_difficulty_check
+                    CHECK (difficulty IN ('easy', 'medium', 'advanced'));
+
             """)
             print("Migrations applied successfully.")
 
