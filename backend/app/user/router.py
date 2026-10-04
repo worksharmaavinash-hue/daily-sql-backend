@@ -1,6 +1,6 @@
 import json
 import os
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from datetime import date
 from app.db import get_pool
 from app.auth.jwt import verify_jwt, verify_jwt_optional
@@ -636,6 +636,26 @@ async def get_public_profile(username: str):
         )
         heatmap = {str(r["attempt_date"]): r["count"] for r in heatmap_rows}
 
+        # Leaderboard rank for this profile, independent of any leaderboard page size
+        rank_row = await conn.fetchrow(
+            """
+            WITH ranked AS (
+                SELECT
+                    u.user_id,
+                    RANK() OVER (
+                        ORDER BY COALESCE(COUNT(DISTINCT us.problem_id), 0) DESC, COALESCE(s.current_streak, 0) DESC
+                    ) AS rank
+                FROM core.users u
+                LEFT JOIN core.user_solutions us ON us.user_id = u.user_id
+                LEFT JOIN core.streaks s ON u.user_id = s.user_id
+                GROUP BY u.user_id, s.current_streak
+            )
+            SELECT rank FROM ranked WHERE user_id = $1
+            """,
+            profile["user_id"]
+        )
+        leaderboard_rank = rank_row["rank"] if rank_row else None
+
     return {
         "username": username,
         "full_name": profile["full_name"],
@@ -649,7 +669,8 @@ async def get_public_profile(username: str):
         "joined_at": profile["created_at"],
         "stats": stats,
         "submissions": submissions,
-        "heatmap": heatmap
+        "heatmap": heatmap,
+        "leaderboard_rank": leaderboard_rank
     }
 
 @router.post("/me/profile")
@@ -908,34 +929,44 @@ async def get_practice_heatmap(user=Depends(verify_jwt)):
     return {str(r["attempt_date"]): r["count"] for r in rows}
 
 @router.get("/leaderboard")
-async def get_leaderboard():
+async def get_leaderboard(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT
-                u.user_id,
-                u.username,
-                u.is_public_profile,
-                u.full_name,
-                u.avatar_url,
-                u.job_role,
-                u.occupation,
-                COUNT(DISTINCT us.problem_id) AS total_solved,
-                COALESCE(s.current_streak, 0) AS current_streak
-            FROM core.user_solutions us
-            JOIN core.users u ON us.user_id = u.user_id
-            LEFT JOIN core.streaks s ON u.user_id = s.user_id
-            GROUP BY u.user_id, u.username, u.is_public_profile, u.full_name, u.avatar_url, u.job_role, u.occupation, s.current_streak
-            ORDER BY total_solved DESC, current_streak DESC
-            LIMIT 20
-            """
+            WITH ranked AS (
+                SELECT
+                    u.user_id,
+                    u.username,
+                    u.is_public_profile,
+                    u.full_name,
+                    u.avatar_url,
+                    u.job_role,
+                    u.occupation,
+                    COALESCE(COUNT(DISTINCT us.problem_id), 0) AS total_solved,
+                    COALESCE(s.current_streak, 0) AS current_streak,
+                    RANK() OVER (
+                        ORDER BY COALESCE(COUNT(DISTINCT us.problem_id), 0) DESC, COALESCE(s.current_streak, 0) DESC
+                    ) AS rank
+                FROM core.users u
+                LEFT JOIN core.user_solutions us ON us.user_id = u.user_id
+                LEFT JOIN core.streaks s ON u.user_id = s.user_id
+                GROUP BY u.user_id, u.username, u.is_public_profile, u.full_name, u.avatar_url, u.job_role, u.occupation, s.current_streak
+            )
+            SELECT *, (SELECT COUNT(*) FROM ranked) AS total_count
+            FROM ranked
+            ORDER BY rank, user_id
+            LIMIT $1 OFFSET $2
+            """,
+            limit, offset
         )
 
-    result = []
+    total = rows[0]["total_count"] if rows else 0
+    entries = []
     for r in rows:
-        result.append({
+        entries.append({
+            "rank": r["rank"],
             "user_id": str(r["user_id"]),
             "username": r["username"],
             "full_name": r["full_name"] if r["full_name"] else "Anonymous User",
@@ -944,7 +975,43 @@ async def get_leaderboard():
             "total_solved": r["total_solved"],
             "current_streak": r["current_streak"],
         })
-    return result
+    return {"entries": entries, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/leaderboard/me")
+async def get_my_leaderboard_rank(user=Depends(verify_jwt)):
+    pool = await get_pool()
+    user_id = user["user_id"]
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            WITH ranked AS (
+                SELECT
+                    u.user_id,
+                    COALESCE(COUNT(DISTINCT us.problem_id), 0) AS total_solved,
+                    COALESCE(s.current_streak, 0) AS current_streak,
+                    RANK() OVER (
+                        ORDER BY COALESCE(COUNT(DISTINCT us.problem_id), 0) DESC, COALESCE(s.current_streak, 0) DESC
+                    ) AS rank
+                FROM core.users u
+                LEFT JOIN core.user_solutions us ON us.user_id = u.user_id
+                LEFT JOIN core.streaks s ON u.user_id = s.user_id
+                GROUP BY u.user_id, s.current_streak
+            )
+            SELECT rank, total_solved, current_streak FROM ranked WHERE user_id = $1
+            """,
+            user_id
+        )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {
+        "rank": row["rank"],
+        "total_solved": row["total_solved"],
+        "current_streak": row["current_streak"],
+    }
 
 
 
