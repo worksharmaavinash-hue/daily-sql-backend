@@ -141,6 +141,12 @@ app.include_router(payments_router)
 app.include_router(coupons_router)
 app.include_router(announcements_router)
 
+# Razorpay test harness (admin-only, 404 to everyone else, never grants plans) — opt-in via env flag
+if os.getenv("RAZORPAY_TEST_HARNESS", "").lower() in ("1", "true", "yes"):
+    from app.payments.razorpay_test_router import router as razorpay_test_router
+    app.include_router(razorpay_test_router)
+    print("[Startup] Razorpay test harness mounted at /api/rzp-test")
+
 # Prometheus Metrics Exporter
 try:
     from prometheus_fastapi_instrumentator import Instrumentator
