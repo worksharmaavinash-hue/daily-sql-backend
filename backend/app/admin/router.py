@@ -1447,6 +1447,8 @@ async def remove_wa_group_member(user_id: str):
 class UpdatePlanRequest(BaseModel):
     price_inr: Optional[float] = None
     original_price_inr: Optional[float] = None   # strike-through "was" price; send 0 to clear
+    price_usd: Optional[float] = None
+    original_price_usd: Optional[float] = None   # strike-through "was" price in USD; send 0 to clear
     is_active: Optional[bool] = None
 
 
@@ -1474,6 +1476,10 @@ async def update_admin_plan(plan_id: str, payload: UpdatePlanRequest, request: R
         raise HTTPException(status_code=400, detail="price_inr must be between 1 and 1,000,000.")
     if payload.original_price_inr is not None and payload.original_price_inr < 0:
         raise HTTPException(status_code=400, detail="original_price_inr cannot be negative.")
+    if payload.price_usd is not None and not (1 <= payload.price_usd <= 100_000):
+        raise HTTPException(status_code=400, detail="price_usd must be between 1 and 100,000.")
+    if payload.original_price_usd is not None and payload.original_price_usd < 0:
+        raise HTTPException(status_code=400, detail="original_price_usd cannot be negative.")
 
     staff = getattr(request.state, "staff", None) or {}
     actor = staff.get("email") or staff.get("staff_id") or "unknown"
@@ -1482,7 +1488,8 @@ async def update_admin_plan(plan_id: str, payload: UpdatePlanRequest, request: R
     async with pool.acquire() as conn:
         async with conn.transaction():
             old = await conn.fetchrow(
-                "SELECT price_inr, original_price_inr, is_active FROM core.subscription_plans WHERE id = $1 FOR UPDATE",
+                "SELECT price_inr, original_price_inr, price_usd, original_price_usd, is_active "
+                "FROM core.subscription_plans WHERE id = $1 FOR UPDATE",
                 plan_id,
             )
             if not old:
@@ -1493,30 +1500,50 @@ async def update_admin_plan(plan_id: str, payload: UpdatePlanRequest, request: R
                 new_original = old["original_price_inr"]
             else:
                 new_original = payload.original_price_inr or None   # 0 clears it
+            new_price_usd = payload.price_usd if payload.price_usd is not None else old["price_usd"]
+            if payload.original_price_usd is None:
+                new_original_usd = old["original_price_usd"]
+            else:
+                new_original_usd = payload.original_price_usd or None   # 0 clears it
             new_active = payload.is_active if payload.is_active is not None else old["is_active"]
 
             if new_original is not None and float(new_original) < float(new_price):
                 raise HTTPException(status_code=400, detail="The list (strike-through) price cannot be lower than the price.")
+            if new_original_usd is not None and new_price_usd is not None and float(new_original_usd) < float(new_price_usd):
+                raise HTTPException(status_code=400, detail="The USD list (strike-through) price cannot be lower than the USD price.")
 
             await conn.execute(
-                "UPDATE core.subscription_plans SET price_inr = $1, original_price_inr = $2, is_active = $3 WHERE id = $4",
-                new_price, new_original, new_active, plan_id,
+                """
+                UPDATE core.subscription_plans
+                SET price_inr = $1, original_price_inr = $2, price_usd = $3, original_price_usd = $4, is_active = $5
+                WHERE id = $6
+                """,
+                new_price, new_original, new_price_usd, new_original_usd, new_active, plan_id,
             )
             await conn.execute(
                 """
                 INSERT INTO core.plan_price_audit
-                    (plan_id, old_price, new_price, old_original_price, new_original_price, old_is_active, new_is_active, changed_by)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    (plan_id, old_price, new_price, old_original_price, new_original_price,
+                     old_price_usd, new_price_usd, old_original_price_usd, new_original_price_usd,
+                     old_is_active, new_is_active, changed_by)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 """,
                 plan_id, old["price_inr"], new_price, old["original_price_inr"], new_original,
+                old["price_usd"], new_price_usd, old["original_price_usd"], new_original_usd,
                 old["is_active"], new_active, actor,
             )
     invalidate_plans_cache()
+
+    def _f(v):
+        return float(v) if v is not None else None
+
     return {
         "status": "success",
         "plan_id": plan_id,
         "price_inr": float(new_price),
-        "original_price_inr": float(new_original) if new_original is not None else None,
+        "original_price_inr": _f(new_original),
+        "price_usd": _f(new_price_usd),
+        "original_price_usd": _f(new_original_usd),
         "is_active": bool(new_active),
     }
 
@@ -1534,6 +1561,8 @@ async def plan_price_audit():
             "plan_id": r["plan_id"],
             "old_price": float(r["old_price"]) if r["old_price"] is not None else None,
             "new_price": float(r["new_price"]) if r["new_price"] is not None else None,
+            "old_price_usd": float(r["old_price_usd"]) if r["old_price_usd"] is not None else None,
+            "new_price_usd": float(r["new_price_usd"]) if r["new_price_usd"] is not None else None,
             "old_is_active": r["old_is_active"],
             "new_is_active": r["new_is_active"],
             "changed_by": r["changed_by"],
@@ -1733,8 +1762,8 @@ async def list_admin_subscriptions(status: Optional[str] = None):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT s.id, s.user_id, s.plan_id, s.status, s.amount_paid,
-                   s.cashfree_order_id, s.cashfree_payment_id,
+            SELECT s.id, s.user_id, s.plan_id, s.status, s.amount_paid, s.currency, s.payment_gateway,
+                   s.cashfree_order_id, s.cashfree_payment_id, s.razorpay_order_id,
                    s.starts_at, s.expires_at, s.created_at,
                    u.email, u.username, u.full_name, u.plan as current_user_plan,
                    p.name as plan_name
@@ -1755,8 +1784,11 @@ async def list_admin_subscriptions(status: Optional[str] = None):
             "plan_name": r["plan_name"] or r["plan_id"].capitalize(),
             "status": r["status"],
             "amount_paid": float(r["amount_paid"]) if r["amount_paid"] else 0.0,
+            "currency": r["currency"] or "INR",
+            "payment_gateway": r["payment_gateway"],
             "cashfree_order_id": r["cashfree_order_id"],
             "cashfree_payment_id": r["cashfree_payment_id"],
+            "razorpay_order_id": r["razorpay_order_id"],
             "current_user_plan": r["current_user_plan"],
             "starts_at": r["starts_at"].isoformat() if r["starts_at"] else None,
             "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
@@ -1780,19 +1812,26 @@ async def get_subscription_analytics():
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # 1. Total revenue & count by plan
+        # 1. Total revenue & count by plan. INR and USD are kept apart (never summed together):
+        # "revenue" stays INR so existing dashboards keep their meaning, "revenue_usd" is the USD side.
         rev_rows = await conn.fetch(
             """
-            SELECT plan_id, COUNT(*) as count, COALESCE(SUM(amount_paid), 0) as revenue
+            SELECT plan_id, COUNT(*) as count,
+                   COALESCE(SUM(amount_paid) FILTER (WHERE COALESCE(currency, 'INR') = 'INR'), 0) as revenue,
+                   COALESCE(SUM(amount_paid) FILTER (WHERE currency = 'USD'), 0) as revenue_usd
             FROM core.subscriptions
             WHERE status = 'active'
             GROUP BY plan_id
             """
         )
         total_revenue = sum(float(r["revenue"]) for r in rev_rows)
+        total_revenue_usd = sum(float(r["revenue_usd"]) for r in rev_rows)
         active_subscribers_count = sum(r["count"] for r in rev_rows)
 
-        plan_breakdown = {r["plan_id"]: {"count": r["count"], "revenue": float(r["revenue"])} for r in rev_rows}
+        plan_breakdown = {
+            r["plan_id"]: {"count": r["count"], "revenue": float(r["revenue"]), "revenue_usd": float(r["revenue_usd"])}
+            for r in rev_rows
+        }
 
         # 2. Overall Users by current plan
         user_plan_counts = await conn.fetch(
@@ -1811,13 +1850,16 @@ async def get_subscription_analytics():
 
         lifetime_paid_row = await conn.fetchrow(
             """
-            SELECT COUNT(DISTINCT user_id) as count, COALESCE(SUM(amount_paid), 0) as revenue
+            SELECT COUNT(DISTINCT user_id) as count,
+                   COALESCE(SUM(amount_paid) FILTER (WHERE COALESCE(currency, 'INR') = 'INR'), 0) as revenue,
+                   COALESCE(SUM(amount_paid) FILTER (WHERE currency = 'USD'), 0) as revenue_usd
             FROM core.subscriptions
             WHERE plan_id = 'lifetime' AND status = 'active' AND amount_paid > 0
             """
         )
         lifetime_paid_count = lifetime_paid_row["count"] if lifetime_paid_row else 0
         lifetime_paid_revenue = float(lifetime_paid_row["revenue"]) if lifetime_paid_row else 0.0
+        lifetime_paid_revenue_usd = float(lifetime_paid_row["revenue_usd"]) if lifetime_paid_row else 0.0
 
         lifetime_coupon_count = await conn.fetchval(
             "SELECT COUNT(*) FROM core.coupons WHERE is_used = TRUE"
@@ -1861,7 +1903,7 @@ async def get_subscription_analytics():
         # 7. Recent successful payments (Last 10)
         recent_txs = await conn.fetch(
             """
-            SELECT s.id, s.amount_paid, s.plan_id, s.cashfree_order_id, s.created_at,
+            SELECT s.id, s.amount_paid, s.currency, s.plan_id, s.cashfree_order_id, s.created_at,
                    u.email, u.username
             FROM core.subscriptions s
             LEFT JOIN core.users u ON u.user_id = s.user_id
@@ -1874,6 +1916,7 @@ async def get_subscription_analytics():
     return {
         "overview": {
             "total_revenue": total_revenue,
+            "total_revenue_usd": total_revenue_usd,
             "active_subscribers": active_subscribers_count,
             "active_trials": trials_count or 0,
             "expiring_soon": expiring_soon_count or 0,
@@ -1883,6 +1926,7 @@ async def get_subscription_analytics():
             "total_lifetime_members": lifetime_total_count,
             "paid_lifetime_count": lifetime_paid_count,
             "paid_lifetime_revenue": lifetime_paid_revenue,
+            "paid_lifetime_revenue_usd": lifetime_paid_revenue_usd,
             "coupon_redeemed_count": lifetime_coupon_count,
             "unredeemed_coupons_count": unredeemed_coupons_count,
         },
@@ -1898,6 +1942,7 @@ async def get_subscription_analytics():
             {
                 "id": str(r["id"]),
                 "amount": float(r["amount_paid"]) if r["amount_paid"] else 0.0,
+                "currency": r["currency"] or "INR",
                 "plan_id": r["plan_id"],
                 "order_id": r["cashfree_order_id"],
                 "email": r["email"],

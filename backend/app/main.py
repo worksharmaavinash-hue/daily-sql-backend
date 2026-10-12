@@ -10,6 +10,7 @@ from app.votes.router import router as votes_router
 from app.comments.router import router as comments_router
 from app.feedback.router import router as feedback_router
 from app.payments.router import router as payments_router
+from app.payments.cashfree_legacy import router as cashfree_legacy_router
 from app.coupons.router import router as coupons_router
 import app.metrics
 from app.announcements.router import router as announcements_router
@@ -97,6 +98,28 @@ async def lifespan(app: FastAPI):
                     WHERE sort_order IS NULL;
                 UPDATE core.subscription_plans SET original_price_inr = CASE id WHEN 'monthly' THEN 1299 WHEN 'yearly' THEN 3499 WHEN 'lifetime' THEN 9999 END
                     WHERE original_price_inr IS NULL;
+
+                -- Dual-currency pricing + Razorpay. USD prices are seeded once (only while price_usd is
+                -- still NULL) so a price edited in the CMS is never overwritten on restart.
+                ALTER TABLE core.subscription_plans ADD COLUMN IF NOT EXISTS price_usd NUMERIC(10,2);
+                ALTER TABLE core.subscription_plans ADD COLUMN IF NOT EXISTS original_price_usd NUMERIC(10,2);
+                UPDATE core.subscription_plans
+                    SET price_usd = CASE id WHEN 'monthly' THEN 12.99 WHEN 'yearly' THEN 29 WHEN 'lifetime' THEN 79 END,
+                        original_price_usd = CASE id WHEN 'monthly' THEN 19 WHEN 'yearly' THEN 59 WHEN 'lifetime' THEN 149 END
+                    WHERE price_usd IS NULL;
+                ALTER TABLE core.plan_price_audit ADD COLUMN IF NOT EXISTS old_price_usd NUMERIC(10,2);
+                ALTER TABLE core.plan_price_audit ADD COLUMN IF NOT EXISTS new_price_usd NUMERIC(10,2);
+                ALTER TABLE core.plan_price_audit ADD COLUMN IF NOT EXISTS old_original_price_usd NUMERIC(10,2);
+                ALTER TABLE core.plan_price_audit ADD COLUMN IF NOT EXISTS new_original_price_usd NUMERIC(10,2);
+                -- cashfree_order_id keeps our own order reference (dsql_<plan>_<hex>, COUPON_..., manual_grant_...)
+                -- whatever the gateway; Razorpay's own order id is stored alongside it.
+                ALTER TABLE core.subscriptions ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'INR';
+                ALTER TABLE core.subscriptions ADD COLUMN IF NOT EXISTS payment_gateway TEXT;
+                ALTER TABLE core.subscriptions ADD COLUMN IF NOT EXISTS razorpay_order_id TEXT;
+                CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_razorpay_order_id_idx
+                    ON core.subscriptions (razorpay_order_id) WHERE razorpay_order_id IS NOT NULL;
+                UPDATE core.subscriptions SET payment_gateway = 'cashfree'
+                    WHERE payment_gateway IS NULL AND razorpay_order_id IS NULL AND cashfree_order_id LIKE 'dsql%';
             """)
     except Exception as e:
         print(f"[Startup] Pricing migration notice: {e}")
@@ -138,6 +161,7 @@ app.include_router(votes_router)
 app.include_router(comments_router)
 app.include_router(feedback_router)
 app.include_router(payments_router)
+app.include_router(cashfree_legacy_router)
 app.include_router(coupons_router)
 app.include_router(announcements_router)
 

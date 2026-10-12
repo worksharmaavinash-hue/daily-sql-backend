@@ -102,6 +102,12 @@ CASHFREE_WEBHOOK_STATUS = Counter(
     ['event_type', 'status']  # success, signature_error, failure
 )
 
+RAZORPAY_WEBHOOK_STATUS = Counter(
+    'dailysql_razorpay_webhook_total',
+    'Razorpay webhook callback events by outcome status',
+    ['event_type', 'status']  # success, signature_error, order_not_found, ...
+)
+
 # Paywall encounters for free tier
 PAYWALL_ENCOUNTERS = Counter(
     'dailysql_paywall_encounters_total',
