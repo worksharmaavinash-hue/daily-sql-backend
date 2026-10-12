@@ -231,8 +231,9 @@ async def activate_subscription(
                 float(existing["expected_amount"]) if existing["expected_amount"] is not None
                 else await get_plan_price(conn, existing["plan_id"], order_currency)
             )
-            # INR tolerates rounding up to 50 paise; USD up to 1 cent.
-            tolerance = 0.01 if order_currency == "USD" else 0.5
+            # INR tolerates rounding up to 50 paise (legacy Cashfree orders). USD must match to the cent:
+            # anything under half a cent is float noise, a whole cent short is a different amount.
+            tolerance = 0.005 if order_currency == "USD" else 0.5
             if order_amount is not None and expected is not None and abs(float(order_amount) - expected) > tolerance:
                 return {**_sub_summary(existing), "activated": False, "reason": "amount_mismatch"}
             claimed = await conn.fetchrow(

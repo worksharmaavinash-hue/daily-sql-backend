@@ -273,6 +273,13 @@ async def init_db():
                         ('lifetime', 'Lifetime Plan', 4999.00, NULL, '["Full access to all questions", "All challenge types", "VIP support", "All future content"]'::jsonb)
                     ON CONFLICT (id) DO NOTHING;
 
+                    -- On a fresh database the migration above ran before these rows existed, so seed the
+                    -- USD prices here too (still only while unset, so CMS edits are never overwritten).
+                    UPDATE core.subscription_plans
+                        SET price_usd = CASE id WHEN 'monthly' THEN 12.99 WHEN 'yearly' THEN 29 WHEN 'lifetime' THEN 79 END,
+                            original_price_usd = CASE id WHEN 'monthly' THEN 19 WHEN 'yearly' THEN 59 WHEN 'lifetime' THEN 149 END
+                        WHERE price_usd IS NULL;
+
                     INSERT INTO core.launch_config (id, is_active, trial_days, new_user_trial_days, coupon_grace_days)
                     VALUES (1, FALSE, 30, 7, 2)
                     ON CONFLICT (id) DO NOTHING;
