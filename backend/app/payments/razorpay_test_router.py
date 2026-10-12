@@ -9,7 +9,9 @@ Mounted only when RAZORPAY_TEST_HARNESS=1. Built to be safe to leave on in prod:
     indistinguishable from a missing route; optional IP allowlist (RAZORPAY_HARNESS_ALLOWED_IPS) on top
   - routes are excluded from /docs and /openapi.json
   - webhook answers 404 to anything without a valid Razorpay signature
-  - with live keys, amounts are capped at RAZORPAY_HARNESS_MAX_INR (default ₹10) and payments can be refunded
+  - with live keys, amounts are capped at RAZORPAY_HARNESS_MAX_INR / _MAX_USD (default ₹10 / $1) and payments
+    can be refunded
+  - INR and USD are supported; USD needs International Payments enabled on the Razorpay account
 
 Endpoints:
   GET  /api/rzp-test/config            → key id, webhook URL, which secrets are set   (admin)
@@ -44,7 +46,11 @@ RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 RAZORPAY_API = "https://api.razorpay.com/v1"
 IS_LIVE = RAZORPAY_KEY_ID.startswith("rzp_live_")
-MAX_INR = float(os.getenv("RAZORPAY_HARNESS_MAX_INR") or ("10" if IS_LIVE else "500000"))
+MAX_AMOUNT = {
+    "INR": float(os.getenv("RAZORPAY_HARNESS_MAX_INR") or ("10" if IS_LIVE else "500000")),
+    "USD": float(os.getenv("RAZORPAY_HARNESS_MAX_USD") or ("1" if IS_LIVE else "5000")),
+}
+SYMBOL = {"INR": "₹", "USD": "$"}
 ALLOWED_IPS = {ip.strip() for ip in os.getenv("RAZORPAY_HARNESS_ALLOWED_IPS", "").split(",") if ip.strip()}
 
 _NOT_FOUND = HTTPException(status_code=404, detail="Not Found")
@@ -121,7 +127,7 @@ async def config():
     return {
         "key_id": RAZORPAY_KEY_ID,
         "mode": "test" if RAZORPAY_KEY_ID.startswith("rzp_test_") else ("live" if RAZORPAY_KEY_ID else "unset"),
-        "max_inr": MAX_INR,
+        "max_amount": MAX_AMOUNT,
         "ip_allowlist": bool(ALLOWED_IPS),
         "key_secret_set": bool(RAZORPAY_KEY_SECRET),
         "webhook_secret_set": bool(RAZORPAY_WEBHOOK_SECRET),
@@ -131,23 +137,27 @@ async def config():
 
 # ─── Orders ──────────────────────────────────────────────────────────────────
 class CreateOrderRequest(BaseModel):
-    amount_inr: float = Field(gt=0, le=500000)
+    amount: float = Field(gt=0, le=500000)
+    currency: str = Field(default="INR", pattern=r"^(INR|USD)$")
     notes: Optional[str] = None
 
 
 @router.post("/create-order", dependencies=admin)
 async def create_order(body: CreateOrderRequest):
     _require_keys()
-    amount_paise = int(round(body.amount_inr * 100))
-    if amount_paise < 100:
-        raise HTTPException(status_code=400, detail="Razorpay minimum is ₹1.00")
-    if body.amount_inr > MAX_INR:
-        raise HTTPException(status_code=400, detail=f"Harness cap is ₹{MAX_INR:g} (RAZORPAY_HARNESS_MAX_INR)")
+    sym = SYMBOL[body.currency]
+    # Both INR and USD use 2-decimal subunits (paise / cents).
+    amount_subunits = int(round(body.amount * 100))
+    if amount_subunits < 100:
+        raise HTTPException(status_code=400, detail=f"Harness minimum is {sym}1.00")
+    if body.amount > MAX_AMOUNT[body.currency]:
+        raise HTTPException(status_code=400, detail=f"Harness cap is {sym}{MAX_AMOUNT[body.currency]:g} "
+                                                    f"(RAZORPAY_HARNESS_MAX_{body.currency})")
 
     receipt = f"rzptest_{uuid.uuid4().hex[:12]}"
     req = {
-        "amount": amount_paise,
-        "currency": "INR",
+        "amount": amount_subunits,
+        "currency": body.currency,
         "receipt": receipt,
         "notes": {"source": "dailysql-rzp-test", "note": body.notes or ""},
     }
@@ -158,7 +168,7 @@ async def create_order(body: CreateOrderRequest):
         await log_event("order_create_failed", False, message=f"HTTP {res.status_code}", payload={"request": req, "response": data})
         raise HTTPException(status_code=502, detail=data.get("error", {}).get("description", "Razorpay order creation failed"))
 
-    await log_event("order_created", True, order_id=data["id"], message=f"₹{amount_paise / 100:.2f}", payload=data)
+    await log_event("order_created", True, order_id=data["id"], message=f"{sym}{amount_subunits / 100:.2f} {body.currency}", payload=data)
     return {"order_id": data["id"], "amount": data["amount"], "currency": data["currency"], "key_id": RAZORPAY_KEY_ID}
 
 
