@@ -2,7 +2,8 @@
 End-to-end regression tests for subscriptions, payments, coupons, trials, Google sign-in and paywall leaks.
 
 Drives the REAL FastAPI app (in-process, over ASGI) against a REAL PostgreSQL + Redis.
-Only Cashfree's and Google's outbound HTTP calls are faked.
+Only Razorpay's and Google's outbound HTTP calls are faked (plus signed Cashfree webhooks for the legacy
+endpoint that still handles refunds on orders paid before the switch to Razorpay).
 
 Usage — LOCAL THROWAWAY databases only (it TRUNCATEs core.users / core.coupons / core.problems):
     docker run -d --name t_pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=dailysql -p 127.0.0.1:55432:5432 postgres:15
@@ -12,7 +13,7 @@ Usage — LOCAL THROWAWAY databases only (it TRUNCATEs core.users / core.coupons
     python verify_billing_flows.py
 (needs the packages in requirements.txt; on Windows also: pip install tzdata)
 """
-import asyncio, base64, hashlib, hmac, json, os, sys, types, uuid
+import asyncio, base64, hashlib, hmac, json, os, re, sys, types, uuid
 from datetime import datetime, timedelta, timezone
 
 BACKEND = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
@@ -26,10 +27,12 @@ _db_host = urlparse(os.environ["DATABASE_URL"]).hostname
 if _db_host not in ("127.0.0.1", "localhost", "::1"):
     sys.exit(f"Refusing to run: this suite TRUNCATEs tables and may only run against a local throwaway database (DATABASE_URL host is {_db_host!r}).")
 os.environ.update(
-    JWT_SECRET="test-jwt-secret", CASHFREE_APP_ID="app", CASHFREE_SECRET_KEY="cf-secret",
-    CASHFREE_ENV="sandbox", FRONTEND_URL="http://localhost:3000", BACKEND_URL="http://localhost:8000",
+    JWT_SECRET="test-jwt-secret", CASHFREE_SECRET_KEY="cf-secret",
+    RAZORPAY_KEY_ID="rzp_test_fakekey", RAZORPAY_KEY_SECRET="rz-secret", RAZORPAY_WEBHOOK_SECRET="rz-wh-secret",
+    FRONTEND_URL="http://localhost:3000", BACKEND_URL="http://localhost:8000",
     GOOGLE_CLIENT_ID="gid", GOOGLE_CLIENT_SECRET="gsecret", ADMIN_SECRET="admin-secret",
 )
+os.environ.pop("RAZORPAY_TEST_HARNESS", None)
 
 import httpx
 from app.main import app
@@ -41,6 +44,7 @@ from app.auth import router as auth_router
 
 NOW = lambda: datetime.now(timezone.utc)
 PRICE = {"monthly": 899.0, "yearly": 1499.0, "lifetime": 4999.0}
+PRICE_USD = {"monthly": 12.99, "yearly": 29.0, "lifetime": 79.0}
 
 PASSED, FAILED = [], []
 
@@ -50,14 +54,19 @@ def check(name, cond, detail=""):
     print(("  PASS  " if cond else "  FAIL  ") + name + (f"   <- {detail}" if (not cond and detail) else ""))
 
 
-# ── fake Cashfree / Google -----------------------------------------------------------------
-CF = {}
+# ── fake Razorpay / Google -----------------------------------------------------------------
+# RZ["orders"] holds every order the app created. What Razorpay "reports" back is controlled by:
+#   payment_status  "captured" (paid) | "authorized" (paid, auto-capture off) | None (no payment yet)
+#   amount          major-unit amount to report instead of the order's real one (tamper tests)
+#   currency        currency to report on the payment instead of the order's real one
+RZ = {"orders": {}}
 
 
-def cf_reset(status="PAID", amount=899.0):
-    CF.clear()
-    CF.update(status=status, amount=amount, cf_order_id=555,
-              payments=[{"cf_payment_id": 777, "payment_status": "SUCCESS", "payment_amount": amount}], gets=0)
+def rz_reset(payment_status="captured", amount=None, currency=None):
+    orders = RZ.get("orders", {})
+    RZ.clear()
+    RZ.update(orders=orders, payment_status=payment_status, amount=amount, currency=currency,
+              gets=0, captures=[], last_order_payload=None)
 
 
 class FakeResp:
@@ -69,21 +78,49 @@ class FakeResp:
             raise httpx.HTTPStatusError("err", request=None, response=self)
 
 
-class FakeCashfree:
+def _reported_amount(order):
+    return int(round(RZ["amount"] * 100)) if RZ["amount"] is not None else order["amount"]
+
+
+def _payment(order, status):
+    return {"id": "pay_" + order["id"][-10:], "entity": "payment", "order_id": order["id"], "status": status,
+            "amount": _reported_amount(order), "currency": RZ["currency"] or order["currency"], "amount_refunded": 0}
+
+
+class FakeRazorpay:
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
-    async def post(self, url, **kw):
-        if url.endswith("/orders"):
-            CF["last_order_payload"] = kw.get("json") or {}
-        return FakeResp({"payment_session_id": "sess_" + uuid.uuid4().hex[:6]})
-    async def get(self, url, **kw):
-        CF["gets"] += 1
-        if url.endswith("/payments"):
-            return FakeResp(CF["payments"])
-        return FakeResp({"order_status": CF["status"], "order_amount": CF["amount"], "cf_order_id": CF["cf_order_id"]})
+
+    async def request(self, method, url, json=None, auth=None, timeout=None):
+        assert auth == ("rzp_test_fakekey", "rz-secret"), auth
+        path = url.split("/v1", 1)[1]
+        if method == "POST" and path == "/orders":
+            RZ["last_order_payload"] = json
+            oid = "order_" + uuid.uuid4().hex[:14]
+            RZ["orders"][oid] = {"id": oid, "entity": "order", "amount": json["amount"], "currency": json["currency"],
+                                 "receipt": json["receipt"], "notes": json.get("notes"), "status": "created"}
+            return FakeResp(RZ["orders"][oid])
+        m = re.fullmatch(r"/payments/(pay_\w+)/capture", path)
+        if method == "POST" and m:
+            RZ["captures"].append((m.group(1), json))
+            order = next(o for o in RZ["orders"].values() if "pay_" + o["id"][-10:] == m.group(1))
+            return FakeResp(_payment(order, "captured"))
+        RZ["gets"] += 1
+        m = re.fullmatch(r"/orders/(order_\w+)(/payments)?", path)
+        if method == "GET" and m:
+            order = RZ["orders"].get(m.group(1))
+            if order is None:
+                return FakeResp({"error": {"description": "The id provided does not exist"}}, 400)
+            if m.group(2):
+                items = [_payment(order, RZ["payment_status"])] if RZ["payment_status"] else []
+                return FakeResp({"entity": "collection", "count": len(items), "items": items})
+            status = "paid" if RZ["payment_status"] == "captured" else ("attempted" if RZ["payment_status"] else "created")
+            return FakeResp({**order, "amount": _reported_amount(order), "status": status})
+        raise AssertionError(f"unexpected Razorpay call {method} {path}")
 
 
-pay_router.httpx = types.SimpleNamespace(AsyncClient=FakeCashfree, HTTPStatusError=httpx.HTTPStatusError)
+pay_router.httpx = types.SimpleNamespace(AsyncClient=FakeRazorpay, HTTPError=httpx.HTTPError,
+                                         HTTPStatusError=httpx.HTTPStatusError)
 
 GOOGLE = {}
 
@@ -125,9 +162,6 @@ async def x(sql, *a):
 async def new_user(email=None, plan="free", plan_exp=None, trial_exp=None, trial_type=None, created=None, provider="email", provider_id=None):
     uid = str(uuid.uuid4())
     email = email or f"u{uuid.uuid4().hex[:8]}@example.com"
-    # A number on file so create-order's phone_required check (added alongside this test run — see
-    # payments/router.py's customer_phone fallback chain) doesn't block every test that creates an
-    # order. Tests that specifically exercise phone handling override/clear this themselves.
     await x("""INSERT INTO core.users (user_id, email, hashed_password, auth_provider, provider_id, plan, plan_expires_at,
                                        trial_expires_at, trial_type, created_at, onboarding_completed, whatsapp_number)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, NOW()), TRUE, '9876543210')""",
@@ -139,42 +173,80 @@ def hdr(uid, email, admin=False):
     return {"Authorization": "Bearer " + create_access_token(uid, email, admin)}
 
 
-def sign(body: bytes, ts="1700000000"):
+def rz_sign(message: bytes, secret=b"rz-wh-secret"):
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+async def rz_webhook(payload=None, tamper=False, raw=None, signature=None):
+    body = raw if raw is not None else json.dumps(payload).encode()
+    sig = signature if signature is not None else rz_sign(body)
+    if tamper:
+        body = body + b" "
+    return await client.post("/api/payments/razorpay/webhook", content=body,
+                             headers={"x-razorpay-signature": sig, "content-type": "application/json"})
+
+
+async def rz_order_of(oid):
+    return RZ["orders"][(await sub(oid))["razorpay_order_id"]]
+
+
+async def wh_event(event, oid, *, amount=None, currency=None, status="captured", refunded=None):
+    """A Razorpay webhook payload for our order `oid` (amounts in major units, like the rest of the suite)."""
+    order = await rz_order_of(oid)
+    paise = int(round(amount * 100)) if amount is not None else order["amount"]
+    pay = {"id": "pay_" + order["id"][-10:], "entity": "payment", "order_id": order["id"], "status": status,
+           "amount": paise, "currency": currency or order["currency"],
+           "amount_refunded": int(round(refunded * 100)) if refunded is not None else 0}
+    entities = {"payment": {"entity": pay}}
+    if event == "order.paid":
+        entities["order"] = {"entity": {**order, "amount": paise, "status": "paid"}}
+    if event.startswith("refund."):
+        entities["refund"] = {"entity": {"id": "rfnd_" + uuid.uuid4().hex[:8], "payment_id": pay["id"],
+                                         "amount": int(round((refunded or 0) * 100))}}
+    if event.startswith("payment.dispute"):
+        entities["dispute"] = {"entity": {"id": "disp_" + uuid.uuid4().hex[:8], "payment_id": pay["id"]}}
+    return {"entity": "event", "event": event, "payload": entities}
+
+
+def cf_sign(body: bytes, ts="1700000000"):
     return base64.b64encode(hmac.new(b"cf-secret", ts.encode() + body, hashlib.sha256).digest()).decode()
 
 
-async def webhook(payload, tamper=False, raw=None):
+async def cf_webhook(payload, tamper=False, raw=None):
+    """Legacy Cashfree webhook (orders paid before the switch)."""
     body = raw if raw is not None else json.dumps(payload).encode()
-    sig = sign(body)
+    sig = cf_sign(body)
     if tamper:
         body = body + b" "
     return await client.post("/api/payments/webhook", content=body,
                              headers={"x-webhook-timestamp": "1700000000", "x-webhook-signature": sig})
 
 
-def wh_success(oid, amount):
-    return {"type": "PAYMENT_SUCCESS_WEBHOOK",
-            "data": {"order": {"order_id": oid, "order_amount": amount},
-                     "payment": {"cf_payment_id": 777, "payment_amount": amount}}}
-
-
-async def create_order(uid, email, plan, customer_phone=None):
-    cf_reset(amount=PRICE[plan])
+async def create_order(uid, email, plan, currency=None):
+    rz_reset()
     body = {"plan_id": plan}
-    if customer_phone is not None:
-        body["customer_phone"] = customer_phone
-    r = await client.post("/api/payments/create-order", json=body, headers=hdr(uid, email))
-    return r
+    if currency is not None:
+        body["currency"] = currency
+    return await client.post("/api/payments/create-order", json=body, headers=hdr(uid, email))
 
 
-async def order_for(uid, email, plan):
-    r = await create_order(uid, email, plan)
+async def order_for(uid, email, plan, currency=None):
+    r = await create_order(uid, email, plan, currency)
     assert r.status_code == 200, (r.status_code, r.text)
     return r.json()["order_id"]
 
 
 async def verify(uid, email, oid):
     return await client.get(f"/api/payments/verify-order/{oid}", headers=hdr(uid, email))
+
+
+async def verify_payment(uid, email, oid, *, signature=None, rzp_order_id=None, payment_id=None):
+    order = await rz_order_of(oid)
+    rzp_order_id = rzp_order_id or order["id"]
+    payment_id = payment_id or "pay_" + order["id"][-10:]
+    sig = signature or hmac.new(b"rz-secret", f"{rzp_order_id}|{payment_id}".encode(), hashlib.sha256).hexdigest()
+    return await client.post("/api/payments/verify-payment", headers=hdr(uid, email), json={
+        "order_id": oid, "razorpay_order_id": rzp_order_id, "razorpay_payment_id": payment_id, "razorpay_signature": sig})
 
 
 async def sub(oid):
@@ -201,35 +273,70 @@ async def sweep():
 
 
 # ══════════════════════════ PAYMENTS: #1 #2 #3 #9 #10 ═══════════════════════════════════════
-async def t_customer_phone():
-    print("\n[#15] Cashfree order carries the customer's real phone number — priority chain + required check")
+async def t_order_payload():
+    print("\n[#15] Razorpay order payload and checkout prefill")
     uid, em = await new_user()
-    await x("UPDATE core.users SET whatsapp_number=$1 WHERE user_id=$2", "+91 98765 43211", uid)
-    await order_for(uid, em, "monthly")
-    check("a stored WhatsApp number is sent, normalised to its last 10 digits",
-          CF["last_order_payload"]["customer_details"]["customer_phone"] == "9876543211",
-          CF["last_order_payload"]["customer_details"]["customer_phone"])
+    await x("UPDATE core.users SET whatsapp_number=$1, phone_number=NULL WHERE user_id=$2", "+91 98765 43211", uid)
+    r = await create_order(uid, em, "monthly")
+    d, p = r.json(), RZ["last_order_payload"]
+    check("INR order is created in paise with our order id as the receipt",
+          r.status_code == 200 and p["amount"] == 89900 and p["currency"] == "INR" and p["receipt"] == d["order_id"], str(p))
+    check("order notes carry our order id, plan and user", p["notes"] == {"dsql_order_id": d["order_id"], "plan_id": "monthly", "user_id": uid}, str(p["notes"]))
+    check("response has what Checkout needs (key, Razorpay order id, amount, currency)",
+          d["key_id"] == "rzp_test_fakekey" and d["razorpay_order_id"] in RZ["orders"] and d["amount"] == 89900 and d["currency"] == "INR", str(d))
+    check("a stored WhatsApp number prefills checkout, normalised to its last 10 digits", d["prefill"]["contact"] == "9876543211", str(d["prefill"]))
+    s = await sub(d["order_id"])
+    check("pending row records gateway, currency, expected amount and Razorpay order id",
+          s["status"] == "pending" and s["payment_gateway"] == "razorpay" and s["currency"] == "INR"
+          and float(s["expected_amount"]) == 899.0 and s["razorpay_order_id"] == d["razorpay_order_id"], str(dict(s)))
 
     uid, em = await new_user()
     await x("UPDATE core.users SET whatsapp_number='9876543211', phone_number=$1 WHERE user_id=$2", "+91 90000 11111", uid)
-    await order_for(uid, em, "monthly")
-    check("a saved billing phone_number wins over whatsapp_number",
-          CF["last_order_payload"]["customer_details"]["customer_phone"] == "9000011111",
-          CF["last_order_payload"]["customer_details"]["customer_phone"])
-
-    uid, em = await new_user()
-    await x("UPDATE core.users SET whatsapp_number='9876543211', phone_number='9000011111' WHERE user_id=$1", uid)
-    r = await create_order(uid, em, "monthly", customer_phone="98 765-43212")
-    assert r.status_code == 200, (r.status_code, r.text)
-    check("a number typed at checkout wins over everything stored",
-          CF["last_order_payload"]["customer_details"]["customer_phone"] == "9876543212",
-          CF["last_order_payload"]["customer_details"]["customer_phone"])
-
-    uid, em = await new_user()
-    await x("UPDATE core.users SET whatsapp_number=NULL, phone_number=NULL WHERE user_id=$1", uid)
     r = await create_order(uid, em, "monthly")
-    check("no number anywhere -> 400 phone_required (no more fake placeholder sent to Cashfree)",
-          r.status_code == 400 and r.json().get("detail") == "phone_required", (r.status_code, r.text))
+    check("a saved billing phone_number wins over whatsapp_number", r.json()["prefill"]["contact"] == "9000011111", r.text)
+
+    uid, em = await new_user()
+    await x("UPDATE core.users SET whatsapp_number='joined_via_link', phone_number=NULL WHERE user_id=$1", uid)
+    r = await create_order(uid, em, "monthly")
+    check("no usable number -> order still created, Razorpay Checkout asks for it",
+          r.status_code == 200 and r.json()["prefill"]["contact"] == "", r.text)
+
+
+async def t_usd_orders():
+    print("\n[USD] dual-currency orders")
+    uid, em = await new_user()
+    r = await create_order(uid, em, "yearly", currency="usd")
+    d, p = r.json(), RZ["last_order_payload"]
+    check("USD order is created in cents at the USD price", r.status_code == 200 and p["amount"] == 2900 and p["currency"] == "USD", str(p))
+    s = await sub(d["order_id"])
+    check("pending USD row stores currency USD and the USD expected amount", s["currency"] == "USD" and float(s["expected_amount"]) == 29.0, str(dict(s)))
+    r = await verify(uid, em, d["order_id"])
+    s = await sub(d["order_id"])
+    check("paid USD order activates with amount_paid in USD", s["status"] == "active" and float(s["amount_paid"]) == 29.0 and (await usr(uid))["plan"] == "yearly", r.text)
+
+    r = await create_order(uid, em, "yearly", currency="EUR")
+    check("unsupported currency -> 400", r.status_code == 400, r.text)
+
+    await x("UPDATE core.subscription_plans SET price_usd=NULL WHERE id='lifetime'")
+    S.invalidate_plans_cache()
+    try:
+        r = await create_order(uid, em, "lifetime", currency="USD")
+        check("plan without a USD price cannot be bought in USD (400)", r.status_code == 400, r.text)
+        r = await create_order(uid, em, "lifetime", currency="INR")
+        check("...but can still be bought in INR", r.status_code == 200, r.text)
+    finally:
+        await x("UPDATE core.subscription_plans SET price_usd=79 WHERE id='lifetime'")
+        S.invalidate_plans_cache()
+
+    uid, em = await new_user()
+    oid = await order_for(uid, em, "monthly", currency="USD")
+    rz_reset(currency="INR")                                  # gateway reports the right number in the wrong currency
+    r = await verify(uid, em, oid)
+    check("payment in the wrong currency is NOT activated", (await sub(oid))["status"] == "pending" and r.json()["order_status"] == "FAILED", r.text)
+    await rz_webhook(await wh_event("payment.captured", oid, amount=12.99, currency="INR"))
+    check("...not even through the webhook", (await sub(oid))["status"] == "pending")
+    await rz_webhook(await wh_event("payment.captured", oid))
+    check("the same order paid in USD does activate", (await sub(oid))["status"] == "active" and (await sub(oid))["currency"] == "USD")
 
 
 async def t_create_order_rules():
@@ -252,6 +359,46 @@ async def t_create_order_rules():
     r = await create_order(uid, em, "monthly")
     check("monthly holder CAN renew early", r.status_code == 200, r.text)
 
+    r = await create_order(uid, em, "weekly")
+    check("unknown plan -> 400", r.status_code == 400, r.text)
+
+
+async def t_checkout_handler():
+    print("\n[checkout] Razorpay handler callback (/verify-payment)")
+    uid, em = await new_user()
+    oid = await order_for(uid, em, "monthly")
+    r = await verify_payment(uid, em, oid, signature="0" * 64)
+    check("bad checkout signature -> 400, nothing activated", r.status_code == 400 and (await sub(oid))["status"] == "pending", r.text)
+
+    other_uid, other_em = await new_user()
+    other = await order_for(other_uid, other_em, "monthly")
+    r = await verify_payment(uid, em, oid, rzp_order_id=(await sub(other))["razorpay_order_id"])
+    check("a validly signed payment for a DIFFERENT Razorpay order -> 400", r.status_code == 400 and (await sub(oid))["status"] == "pending", r.text)
+
+    rz_reset(payment_status=None)
+    r = await verify_payment(uid, em, oid)
+    check("valid signature but Razorpay has no captured payment -> not activated (ACTIVE)",
+          r.status_code == 200 and r.json()["order_status"] == "ACTIVE" and (await sub(oid))["status"] == "pending", r.text)
+
+    rz_reset()
+    r = await verify_payment(uid, em, oid)
+    s = await sub(oid)
+    check("valid signature + captured payment -> activated", r.status_code == 200 and r.json()["order_status"] == "PAID"
+          and s["status"] == "active" and (await usr(uid))["plan"] == "monthly", r.text)
+    check("Razorpay payment id is stored", s["cashfree_payment_id"] == "pay_" + s["razorpay_order_id"][-10:], str(s["cashfree_payment_id"]))
+
+    r = await verify_payment(other_uid, other_em, oid)
+    check("someone else's order -> 403", r.status_code == 403, r.text)
+
+    print("\n[checkout] auto-capture off: an authorized payment is captured by us")
+    uid, em = await new_user()
+    oid = await order_for(uid, em, "yearly")
+    rz_reset(payment_status="authorized")
+    r = await verify(uid, em, oid)
+    check("authorized payment is captured for the full amount in its currency",
+          RZ["captures"] and RZ["captures"][0][1] == {"amount": 149900, "currency": "INR"}, str(RZ["captures"]))
+    check("...and the plan is activated", r.json()["order_status"] == "PAID" and (await sub(oid))["status"] == "active", r.text)
+
 
 async def t_activation_idempotent():
     print("\n[#1] activation happens exactly once")
@@ -264,10 +411,12 @@ async def t_activation_idempotent():
 
     await asyncio.sleep(1.1)
     await verify(uid, em, oid)
-    await webhook(wh_success(oid, 899.0))
-    check("repeat verify-order + late webhook do NOT move the expiry", (await sub(oid))["expires_at"] == exp1)
+    await verify_payment(uid, em, oid)
+    await rz_webhook(await wh_event("payment.captured", oid))
+    await rz_webhook(await wh_event("order.paid", oid))
+    check("repeat verify-order, handler callback and late webhooks do NOT move the expiry", (await sub(oid))["expires_at"] == exp1)
 
-    # simulate the paid month running out; Cashfree still says PAID forever
+    # simulate the paid month running out; Razorpay still says paid forever
     await x("UPDATE core.subscriptions SET expires_at=NOW()-interval '1 day' WHERE cashfree_order_id=$1", oid)
     await x("UPDATE core.users SET plan_expires_at=NOW()-interval '1 day' WHERE user_id=$1", uid)
     r = await verify(uid, em, oid)
@@ -276,13 +425,13 @@ async def t_activation_idempotent():
 
 
 async def t_concurrent_activation():
-    print("\n[#1] webhook + verify-order racing")
+    print("\n[#1] webhook + verify-order + handler racing")
     uid, em = await new_user()
     oid = await order_for(uid, em, "yearly")
-    CF.update(amount=1499.0)
+    captured, paid = await wh_event("payment.captured", oid), await wh_event("order.paid", oid)
     res = await asyncio.gather(
-        verify(uid, em, oid), verify(uid, em, oid), verify(uid, em, oid),
-        webhook(wh_success(oid, 1499.0)), webhook(wh_success(oid, 1499.0)),
+        verify(uid, em, oid), verify(uid, em, oid), verify_payment(uid, em, oid),
+        rz_webhook(captured), rz_webhook(paid),
     )
     s = await sub(oid)
     check("all 5 concurrent calls succeed", all(r.status_code == 200 for r in res), str([r.status_code for r in res]))
@@ -312,7 +461,6 @@ async def t_cancel_keeps_access():
 
     uid, em = await new_user()
     oid = await order_for(uid, em, "lifetime")
-    CF.update(amount=4999.0)
     await verify(uid, em, oid)
     r = await client.post("/api/payments/cancel", json={}, headers=hdr(uid, em))
     check("cancelling a lifetime plan is refused with an explanation (400)", r.status_code == 400, r.text)
@@ -322,37 +470,39 @@ async def t_refund_dispute():
     print("\n[#2] refunds, partial refunds and chargebacks")
     uid, em = await new_user()
     oid = await order_for(uid, em, "lifetime")
-    CF.update(amount=4999.0)
     await verify(uid, em, oid)
     check("lifetime active before refund", (await usr(uid))["plan"] == "lifetime")
-    body = {"type": "REFUND_STATUS_WEBHOOK", "data": {"refund": {"order_id": oid, "refund_amount": 4999.0, "refund_status": "SUCCESS"}}}
-    r = await webhook(body)
-    check("refund webhook accepted", r.status_code == 200)
+    r = await rz_webhook(await wh_event("refund.processed", oid, status="refunded", refunded=4999.0))
+    check("refund webhook accepted", r.status_code == 200, r.text)
     s = await sub(oid)
     check("subscription marked refunded with amount", s["status"] == "refunded" and float(s["refunded_amount"]) == 4999.0, str(s["status"]))
     check("user loses access after a full refund", (await usr(uid))["plan"] == "free" and not await has_access(uid))
     r = await verify(uid, em, oid)
-    check("verify-order can NOT bring a refunded order back (Cashfree still says PAID)", r.json()["subscription"] is None and not await has_access(uid))
+    check("verify-order can NOT bring a refunded order back (Razorpay still says paid)", r.json()["subscription"] is None and not await has_access(uid))
 
     uid, em = await new_user()
     oid = await order_for(uid, em, "monthly")
     await verify(uid, em, oid)
-    part = {"type": "REFUND_STATUS_WEBHOOK", "data": {"refund": {"order_id": oid, "refund_amount": 100.0, "refund_status": "SUCCESS"}}}
-    await webhook(part)
+    await rz_webhook(await wh_event("refund.processed", oid, status="captured", refunded=100.0))
     check("partial refund is recorded but access is kept", (await sub(oid))["status"] == "active" and float((await sub(oid))["refunded_amount"]) == 100.0 and await has_access(uid))
-    await webhook({"type": "REFUND_STATUS_WEBHOOK", "data": {"refund": {"order_id": oid, "refund_amount": 899.0, "refund_status": "PENDING"}}})
-    check("a PENDING refund does not revoke yet", (await sub(oid))["status"] == "active")
+    await rz_webhook(await wh_event("refund.created", oid, status="captured", refunded=899.0))
+    check("a refund that is only created (not processed) does not revoke yet", (await sub(oid))["status"] == "active")
+
+    uid, em = await new_user()
+    oid = await order_for(uid, em, "yearly", currency="USD")
+    await verify(uid, em, oid)
+    await rz_webhook(await wh_event("refund.processed", oid, status="refunded", refunded=29.0))
+    check("full refund of a USD order (in USD) revokes it", (await sub(oid))["status"] == "refunded" and not await has_access(uid))
 
     uid, em = await new_user()
     oid = await order_for(uid, em, "yearly")
-    CF.update(amount=1499.0)
     await verify(uid, em, oid)
-    await webhook({"type": "DISPUTE_CREATED", "data": {"dispute": {"order_id": oid}}})
+    await rz_webhook(await wh_event("payment.dispute.created", oid))
     check("chargeback (dispute) suspends the access it gave", (await sub(oid))["status"] == "disputed" and not await has_access(uid))
 
     uid, em = await new_user()
     oid = await order_for(uid, em, "monthly")
-    await webhook({"type": "REFUND_STATUS_WEBHOOK", "data": {"refund": {"order_id": oid, "refund_amount": 899.0, "refund_status": "SUCCESS"}}})
+    await rz_webhook(await wh_event("refund.processed", oid, status="refunded", refunded=899.0))
     check("refund of a never-activated (pending) order blocks a later activation",
           (await sub(oid))["status"] == "refunded" and (await verify(uid, em, oid)).json()["subscription"] is None)
 
@@ -367,9 +517,17 @@ async def t_no_downgrade_and_amount():
 
     uid, em = await new_user()
     oid = await order_for(uid, em, "monthly")
-    CF.update(amount=1.0)                                     # gateway reports a wrong order amount
+    rz_reset(amount=1.0)                                      # gateway reports a wrong order amount
     r = await verify(uid, em, oid)
     check("wrong order amount is NOT activated", (await sub(oid))["status"] == "pending" and r.json()["subscription"] is None)
+    await rz_webhook(await wh_event("payment.captured", oid, amount=1.0))
+    check("...not even through the webhook", (await sub(oid))["status"] == "pending")
+
+    uid, em = await new_user()
+    oid = await order_for(uid, em, "monthly", currency="USD")
+    rz_reset(amount=12.98)
+    await verify(uid, em, oid)
+    check("a USD amount off by one cent is NOT activated", (await sub(oid))["status"] == "pending")
 
     print("\n[#1] renewal / upgrade paid time is preserved")
     uid, em = await new_user(plan="monthly", plan_exp=NOW() + timedelta(days=10))
@@ -382,7 +540,6 @@ async def t_no_downgrade_and_amount():
 
     uid, em = await new_user(plan="monthly", plan_exp=NOW() + timedelta(days=10))
     oid = await order_for(uid, em, "yearly")
-    CF.update(amount=1499.0)
     await verify(uid, em, oid)
     u = await usr(uid)
     d = (u["plan_expires_at"] - NOW()).days
@@ -392,7 +549,6 @@ async def t_no_downgrade_and_amount():
     print("\n[#1b] buying a paid plan mid-trial stacks onto the trial's remaining time")
     uid, em = await new_user(trial_exp=NOW() + timedelta(days=4), trial_type="new_signup")
     oid = await order_for(uid, em, "monthly")
-    CF.update(amount=899.0)
     await verify(uid, em, oid)
     u = await usr(uid)
     d = (u["plan_expires_at"] - NOW()).days
@@ -402,7 +558,6 @@ async def t_no_downgrade_and_amount():
     print("\n[#1c] a plain first purchase (no live plan, no live trial) is unaffected")
     uid, em = await new_user()
     oid = await order_for(uid, em, "monthly")
-    CF.update(amount=899.0)
     await verify(uid, em, oid)
     d = ((await usr(uid))["plan_expires_at"] - NOW()).days
     check("fresh monthly purchase is ~30 days, not stacked onto anything", 29 <= d <= 30, str(d))
@@ -413,27 +568,105 @@ async def t_verify_hardening():
     a, ea = await new_user()
     b, eb = await new_user()
     oid = await order_for(a, ea, "monthly")
-    CF["gets"] = 0
+    RZ["gets"] = 0
     r = await verify(b, eb, oid)
-    check("another user's order -> 403 and NO outbound Cashfree call", r.status_code == 403 and CF["gets"] == 0, f"{r.status_code} gets={CF['gets']}")
+    check("another user's order -> 403 and NO outbound Razorpay call", r.status_code == 403 and RZ["gets"] == 0, f"{r.status_code} gets={RZ['gets']}")
     r = await client.get("/api/payments/verify-order/COUPON_ABC", headers=hdr(a, ea))
-    check("non-Cashfree order id -> 400", r.status_code == 400, str(r.status_code))
+    check("non-payment order id (coupon) -> 400", r.status_code == 400, str(r.status_code))
     r = await client.get("/api/payments/verify-order/dsql_monthly_zzzz", headers=hdr(a, ea))
     check("malformed order id -> 400", r.status_code == 400)
+    rz_reset(payment_status=None)
     r = await verify(a, ea, oid)
-    s = await sub(oid)
-    check("real payment id is now stored (was: silently never looked up)", s["cashfree_payment_id"] == "777", str(s["cashfree_payment_id"]))
+    check("unpaid order reports ACTIVE (still awaiting payment)", r.json()["order_status"] == "ACTIVE" and (await sub(oid))["status"] == "pending", r.text)
 
 
 async def t_webhook_security():
-    print("\n[L1] webhook signature handling")
-    r = await webhook({"type": "PAYMENT_SUCCESS_WEBHOOK", "data": {}}, tamper=True)
-    check("tampered body -> 401", r.status_code == 401)
-    body = b"\xff\xfe\xfa"
-    r = await client.post("/api/payments/webhook", content=body, headers={"x-webhook-timestamp": "1", "x-webhook-signature": "AAAA"})
-    check("non-UTF-8 body -> 401 (was: unhandled 500)", r.status_code == 401, str(r.status_code))
-    r = await client.post("/api/payments/webhook", content=b"{}")
-    check("missing signature headers -> 401", r.status_code == 401)
+    print("\n[L1] Razorpay webhook signature handling")
+    uid, em = await new_user()
+    oid = await order_for(uid, em, "monthly")
+    payload = await wh_event("payment.captured", oid)
+    r = await rz_webhook(payload, tamper=True)
+    check("tampered body -> 400 and nothing activated", r.status_code == 400 and (await sub(oid))["status"] == "pending", str(r.status_code))
+    r = await rz_webhook(payload, signature=rz_sign(json.dumps(payload).encode(), secret=b"wrong-secret"))
+    check("body signed with the wrong secret -> 400", r.status_code == 400 and (await sub(oid))["status"] == "pending", str(r.status_code))
+    r = await client.post("/api/payments/razorpay/webhook", content=b"\xff\xfe\xfa", headers={"x-razorpay-signature": "AAAA"})
+    check("non-UTF-8 body -> 400 (not an unhandled 500)", r.status_code == 400, str(r.status_code))
+    r = await client.post("/api/payments/razorpay/webhook", content=json.dumps(payload).encode())
+    check("missing signature header -> 400", r.status_code == 400 and (await sub(oid))["status"] == "pending", str(r.status_code))
+    r = await rz_webhook(raw=b"not json")
+    check("validly signed but not JSON -> 400", r.status_code == 400, str(r.status_code))
+    r = await rz_webhook({"event": "payment.captured", "payload": {"payment": {"entity": {
+        "id": "pay_x", "order_id": "order_doesnotexist", "status": "captured", "amount": 100, "currency": "INR"}}}})
+    check("unknown Razorpay order is acknowledged (200) so Razorpay stops retrying", r.status_code == 200, r.text)
+    r = await rz_webhook(await wh_event("payment.authorized", oid, status="authorized"))
+    check("payment.authorized alone does not activate", r.status_code == 200 and (await sub(oid))["status"] == "pending")
+    r = await rz_webhook(payload)
+    check("correctly signed payment.captured activates", r.status_code == 200 and (await sub(oid))["status"] == "active", r.text)
+
+
+async def t_cashfree_legacy():
+    print("\n[legacy] Cashfree webhook still handles orders paid before the switch")
+    uid, em = await new_user()
+    oid = "dsql_lifetime_" + uuid.uuid4().hex[:10]
+    await x("""INSERT INTO core.subscriptions (user_id, plan_id, status, cashfree_order_id, cashfree_payment_id, amount_paid,
+                                             expected_amount, payment_gateway, starts_at)
+               VALUES ($1, 'lifetime', 'active', $2, '777', 4999, 4999, 'cashfree', NOW())""", uid, oid)
+    await x("UPDATE core.users SET plan='lifetime', plan_expires_at=NULL WHERE user_id=$1", uid)
+    r = await cf_webhook({"type": "REFUND_STATUS_WEBHOOK", "data": {"refund": {"order_id": oid, "refund_amount": 4999.0, "refund_status": "SUCCESS"}}}, tamper=True)
+    check("tampered Cashfree webhook -> 401", r.status_code == 401, str(r.status_code))
+    r = await cf_webhook({"type": "REFUND_STATUS_WEBHOOK", "data": {"refund": {"order_id": oid, "refund_amount": 4999.0, "refund_status": "SUCCESS"}}})
+    check("full Cashfree refund on an old order still revokes it", r.status_code == 200 and (await sub(oid))["status"] == "refunded" and not await has_access(uid), r.text)
+
+    uid, em = await new_user()
+    oid = "dsql_monthly_" + uuid.uuid4().hex[:10]
+    await x("""INSERT INTO core.subscriptions (user_id, plan_id, status, cashfree_order_id, expected_amount, payment_gateway)
+               VALUES ($1, 'monthly', 'pending', $2, 899, 'cashfree')""", uid, oid)
+    r = await cf_webhook({"type": "PAYMENT_SUCCESS_WEBHOOK", "data": {"order": {"order_id": oid, "order_amount": 899.0},
+                                                                   "payment": {"cf_payment_id": 778, "payment_amount": 899.0}}})
+    check("a late Cashfree PAYMENT_SUCCESS for a pre-switch order still activates it", (await sub(oid))["status"] == "active" and (await usr(uid))["plan"] == "monthly", r.text)
+    r = await verify(uid, em, oid)
+    check("verify-order on a Cashfree order reports PAID without calling Razorpay", r.status_code == 200 and r.json()["order_status"] == "PAID", r.text)
+
+
+async def t_plans_and_admin_pricing():
+    print("\n[pricing] public catalogue + CMS editing of INR and USD prices")
+    r = await client.get("/api/payments/plans")
+    d = r.json()
+    plans = {p["id"]: p for p in d["plans"]}
+    check("/plans lists both currencies and the Razorpay mode", d["currencies"] == ["INR", "USD"] and d["payment_mode"] == "test", str(d))
+    check("each plan carries its INR and USD price", plans["yearly"]["price"] == 1499.0 and plans["yearly"]["price_usd"] == 29.0, str(plans.get("yearly")))
+
+    admin = hdr(str(uuid.uuid4()), "boss@dailysql.in", admin=True)
+    try:
+        r = await client.put("/admin/plans/yearly", json={"price_usd": 25, "original_price_usd": 49}, headers=admin)
+        check("admin can change the USD price on its own", r.status_code == 200 and r.json()["price_usd"] == 25.0 and r.json()["price_inr"] == 1499.0, r.text)
+        uid, em = await new_user()
+        await create_order(uid, em, "yearly", currency="USD")
+        check("a new USD order uses the new USD price at once", RZ["last_order_payload"]["amount"] == 2500, str(RZ["last_order_payload"]))
+        audit = (await client.get("/admin/plans/audit", headers=admin)).json()
+        check("the change is in the audit log with old and new USD prices",
+              audit and audit[0]["plan_id"] == "yearly" and audit[0]["old_price_usd"] == 29.0 and audit[0]["new_price_usd"] == 25.0, str(audit[:1]))
+        r = await client.put("/admin/plans/yearly", json={"price_usd": 0.5}, headers=admin)
+        check("USD price below $1 is rejected (400)", r.status_code == 400, r.text)
+        r = await client.put("/admin/plans/yearly", json={"original_price_usd": 10}, headers=admin)
+        check("USD list price below the USD price is rejected (400)", r.status_code == 400, r.text)
+        r = await client.put("/admin/plans/yearly", json={"price_usd": 25}, headers=hdr(uid, em))
+        check("a normal user cannot change prices", r.status_code in (401, 403), str(r.status_code))
+    finally:
+        await client.put("/admin/plans/yearly", json={"price_usd": 29, "original_price_usd": 59}, headers=admin)
+
+    print("\n[revenue] INR and USD are reported separately")
+    before = (await client.get("/admin/subscriptions/analytics", headers=admin)).json()["overview"]
+    uid, em = await new_user()
+    oid = await order_for(uid, em, "monthly", currency="USD")
+    await verify(uid, em, oid)
+    after = (await client.get("/admin/subscriptions/analytics", headers=admin)).json()["overview"]
+    check("a USD sale adds to total_revenue_usd only",
+          round(after["total_revenue_usd"] - before["total_revenue_usd"], 2) == 12.99 and after["total_revenue"] == before["total_revenue"],
+          f"{before} -> {after}")
+    rows = (await client.get("/admin/subscriptions", headers=admin)).json()
+    row = next(r for r in rows if r["cashfree_order_id"] == oid)
+    check("subscriptions list shows the currency and gateway", row["currency"] == "USD" and row["payment_gateway"] == "razorpay", str(row))
 
 
 # ══════════════════════════ TRIALS: #4 #7 #8 ════════════════════════════════════════════════
@@ -567,7 +800,6 @@ async def t_admin_grant_revoke():
     # paid order + admin revoke: the user must NOT be able to bring it back through verify-order
     uid, em = await new_user()
     oid = await order_for(uid, em, "yearly")
-    CF.update(amount=1499.0)
     await verify(uid, em, oid)
     r = await client.post("/admin/subscriptions/grant", json={"email": em, "plan_id": "free", "reason": "abuse"}, headers=admin)
     s = await sub(oid)
@@ -755,11 +987,12 @@ async def t_problem_progress():
 async def main():
     await x("TRUNCATE core.users CASCADE")
     await x("TRUNCATE core.coupons CASCADE")
-    cf_reset()
-    tests = [t_create_order_rules, t_activation_idempotent, t_concurrent_activation, t_cancel_keeps_access, t_refund_dispute,
-             t_no_downgrade_and_amount, t_verify_hardening, t_webhook_security, t_trial_never_reopens, t_launch_toggle,
-             t_one_trial_per_mailbox, t_coupons, t_admin_grant_revoke, t_google, t_login_case, t_leaks, t_problem_progress,
-             t_customer_phone]
+    rz_reset()
+    tests = [t_order_payload, t_usd_orders, t_create_order_rules, t_checkout_handler, t_activation_idempotent,
+             t_concurrent_activation, t_cancel_keeps_access, t_refund_dispute, t_no_downgrade_and_amount,
+             t_verify_hardening, t_webhook_security, t_cashfree_legacy, t_plans_and_admin_pricing,
+             t_trial_never_reopens, t_launch_toggle, t_one_trial_per_mailbox, t_coupons, t_admin_grant_revoke,
+             t_google, t_login_case, t_leaks, t_problem_progress]
     for t in tests:
         try:
             await t()

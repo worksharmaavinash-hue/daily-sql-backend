@@ -224,6 +224,28 @@ async def init_db():
                 UPDATE core.subscription_plans SET original_price_inr = CASE id WHEN 'monthly' THEN 1299 WHEN 'yearly' THEN 3499 WHEN 'lifetime' THEN 9999 END
                     WHERE original_price_inr IS NULL;
 
+                -- Dual-currency pricing + Razorpay. USD prices are seeded once (only while price_usd is
+                -- still NULL) so a price edited in the CMS is never overwritten on restart.
+                ALTER TABLE core.subscription_plans ADD COLUMN IF NOT EXISTS price_usd NUMERIC(10,2);
+                ALTER TABLE core.subscription_plans ADD COLUMN IF NOT EXISTS original_price_usd NUMERIC(10,2);
+                UPDATE core.subscription_plans
+                    SET price_usd = CASE id WHEN 'monthly' THEN 12.99 WHEN 'yearly' THEN 29 WHEN 'lifetime' THEN 79 END,
+                        original_price_usd = CASE id WHEN 'monthly' THEN 19 WHEN 'yearly' THEN 59 WHEN 'lifetime' THEN 149 END
+                    WHERE price_usd IS NULL;
+                ALTER TABLE core.plan_price_audit ADD COLUMN IF NOT EXISTS old_price_usd NUMERIC(10,2);
+                ALTER TABLE core.plan_price_audit ADD COLUMN IF NOT EXISTS new_price_usd NUMERIC(10,2);
+                ALTER TABLE core.plan_price_audit ADD COLUMN IF NOT EXISTS old_original_price_usd NUMERIC(10,2);
+                ALTER TABLE core.plan_price_audit ADD COLUMN IF NOT EXISTS new_original_price_usd NUMERIC(10,2);
+                -- cashfree_order_id keeps our own order reference (dsql_<plan>_<hex>, COUPON_..., manual_grant_...)
+                -- whatever the gateway; Razorpay's own order id is stored alongside it.
+                ALTER TABLE core.subscriptions ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'INR';
+                ALTER TABLE core.subscriptions ADD COLUMN IF NOT EXISTS payment_gateway TEXT;
+                ALTER TABLE core.subscriptions ADD COLUMN IF NOT EXISTS razorpay_order_id TEXT;
+                CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_razorpay_order_id_idx
+                    ON core.subscriptions (razorpay_order_id) WHERE razorpay_order_id IS NOT NULL;
+                UPDATE core.subscriptions SET payment_gateway = 'cashfree'
+                    WHERE payment_gateway IS NULL AND razorpay_order_id IS NULL AND cashfree_order_id LIKE 'dsql%';
+
                 -- 11. Normalise core.problems.difficulty to the three canonical values. Historical data
                 -- had a mix of casings ('Easy', 'Medium') and a different word entirely ('Hard' instead
                 -- of 'advanced'), which every difficulty-grouped stats query (profile, public profile)
@@ -250,6 +272,13 @@ async def init_db():
                         ('yearly',   'Yearly Plan',   1499.00, 365,  '["Full access to all questions", "All challenge types", "Priority support", "Best value"]'::jsonb),
                         ('lifetime', 'Lifetime Plan', 4999.00, NULL, '["Full access to all questions", "All challenge types", "VIP support", "All future content"]'::jsonb)
                     ON CONFLICT (id) DO NOTHING;
+
+                    -- On a fresh database the migration above ran before these rows existed, so seed the
+                    -- USD prices here too (still only while unset, so CMS edits are never overwritten).
+                    UPDATE core.subscription_plans
+                        SET price_usd = CASE id WHEN 'monthly' THEN 12.99 WHEN 'yearly' THEN 29 WHEN 'lifetime' THEN 79 END,
+                            original_price_usd = CASE id WHEN 'monthly' THEN 19 WHEN 'yearly' THEN 59 WHEN 'lifetime' THEN 149 END
+                        WHERE price_usd IS NULL;
 
                     INSERT INTO core.launch_config (id, is_active, trial_days, new_user_trial_days, coupon_grace_days)
                     VALUES (1, FALSE, 30, 7, 2)

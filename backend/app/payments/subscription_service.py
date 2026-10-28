@@ -32,6 +32,9 @@ PLAN_RANK: dict[str, int] = {"free": 0, "monthly": 1, "yearly": 2, "lifetime": 3
 # FALLBACK ONLY. The live prices are in core.subscription_plans (editable from the CMS); these values
 # are used only if a plan row is missing from the database.
 PLAN_PRICES: dict[str, float] = {"monthly": 899.00, "yearly": 1499.00, "lifetime": 4999.00}
+PLAN_PRICES_USD: dict[str, float] = {"monthly": 12.99, "yearly": 29.00, "lifetime": 79.00}
+
+SUPPORTED_CURRENCIES = ("INR", "USD")
 
 _PLANS_TTL_SECONDS = 30
 _plans_cache: dict = {"at": 0.0, "data": None}
@@ -45,8 +48,9 @@ def invalidate_plans_cache() -> None:
 async def get_plans(conn, *, use_cache: bool = True, only_active: bool = True) -> dict:
     """
     Plan catalogue from core.subscription_plans, keyed by plan id:
-    {id: {id, name, price, original_price, duration_days, features, sort_order, is_active}}.
-    Anything that charges money must call this with use_cache=False.
+    {id: {id, name, price, original_price, price_usd, original_price_usd, duration_days, features,
+    sort_order, is_active}}. ``price``/``original_price`` are INR. A plan with no USD price cannot be
+    bought in USD. Anything that charges money must call this with use_cache=False.
     """
     import time
     import json as _json
@@ -54,7 +58,8 @@ async def get_plans(conn, *, use_cache: bool = True, only_active: bool = True) -
         return _plans_cache["data"]
     rows = await conn.fetch(
         """
-        SELECT id, name, price_inr, original_price_inr, duration_days, features, sort_order, is_active
+        SELECT id, name, price_inr, original_price_inr, price_usd, original_price_usd,
+               duration_days, features, sort_order, is_active
         FROM core.subscription_plans
         ORDER BY sort_order NULLS LAST, price_inr
         """
@@ -69,6 +74,8 @@ async def get_plans(conn, *, use_cache: bool = True, only_active: bool = True) -
             "name": r["name"],
             "price": float(r["price_inr"]),
             "original_price": float(r["original_price_inr"]) if r["original_price_inr"] is not None else None,
+            "price_usd": float(r["price_usd"]) if r["price_usd"] is not None else None,
+            "original_price_usd": float(r["original_price_usd"]) if r["original_price_usd"] is not None else None,
             "duration_days": r["duration_days"],
             "features": feats or [],
             "sort_order": r["sort_order"],
@@ -80,12 +87,24 @@ async def get_plans(conn, *, use_cache: bool = True, only_active: bool = True) -
     return plans
 
 
-async def get_plan_price(conn, plan_id: str) -> Optional[float]:
-    """Current charge for a plan (always read fresh from the DB), falling back to the built-in default."""
-    price = await conn.fetchval("SELECT price_inr FROM core.subscription_plans WHERE id = $1", plan_id)
+async def get_plan_price(conn, plan_id: str, currency: str = "INR") -> Optional[float]:
+    """Current charge for a plan in INR or USD (always read fresh from the DB), falling back to the built-in default."""
+    column = "price_usd" if currency == "USD" else "price_inr"
+    price = await conn.fetchval(f"SELECT {column} FROM core.subscription_plans WHERE id = $1", plan_id)
     if price is not None:
         return float(price)
-    return PLAN_PRICES.get(plan_id)
+    return (PLAN_PRICES_USD if currency == "USD" else PLAN_PRICES).get(plan_id)
+
+
+def verify_razorpay_signature(message: str, signature: str, secret: str) -> bool:
+    """
+    Razorpay signs with hex HMAC-SHA256: checkout handler -> message "<order_id>|<payment_id>" with the key
+    secret; webhooks -> the raw request body with the webhook secret.
+    """
+    if not signature or not secret:
+        return False
+    computed = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(computed, signature)
 
 
 def _live_paid_plan(plan: Optional[str], plan_expires_at: Optional[datetime], now: datetime) -> Optional[str]:
@@ -134,13 +153,20 @@ async def create_pending_subscription(
     plan_id: str,
     cashfree_order_id: str,
     expected_amount: Optional[float] = None,
+    currency: str = "INR",
+    payment_gateway: str = "razorpay",
+    razorpay_order_id: Optional[str] = None,
 ) -> str:
-    """Insert a pending subscription row (remembering the amount we asked Cashfree to charge) and return its UUID."""
+    """
+    Insert a pending subscription row and return its UUID. Remembers the amount and currency the gateway
+    was asked to charge so activation can refuse an order whose amount was tampered with.
+    ``cashfree_order_id`` is our own order reference (the column predates Razorpay).
+    """
     row = await conn.fetchrow(
         """
         INSERT INTO core.subscriptions
-            (user_id, plan_id, status, cashfree_order_id, expected_amount)
-        VALUES ($1, $2, 'pending', $3, $4)
+            (user_id, plan_id, status, cashfree_order_id, expected_amount, currency, payment_gateway, razorpay_order_id)
+        VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7)
         ON CONFLICT (cashfree_order_id) DO UPDATE
             SET updated_at = NOW()
         RETURNING id
@@ -149,6 +175,9 @@ async def create_pending_subscription(
         plan_id,
         cashfree_order_id,
         expected_amount,
+        currency,
+        payment_gateway,
+        razorpay_order_id,
     )
     return str(row["id"])
 
@@ -159,6 +188,7 @@ async def activate_subscription(
     cashfree_payment_id: str,
     amount_paid: float,
     order_amount: Optional[float] = None,
+    currency: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Activate a paid order — exactly once.
@@ -174,14 +204,15 @@ async def activate_subscription(
       trial is running (no paid plan yet) stacks it on top of the trial's remaining time instead, so
       the paid period starts after the trial would have ended rather than overwriting it.
     - A live trial is ended (its history is kept) because the user is now on a paid plan.
-    - ``order_amount`` (what we asked Cashfree to charge) must match the amount stored when the order was created.
+    - ``order_amount`` (what the gateway charged) must match the amount stored when the order was created,
+      and ``currency`` (if given) must match the order's currency.
 
     Returns None if the order does not exist, otherwise a dict that includes ``activated`` (bool).
     """
     async with conn.transaction():
         existing = await conn.fetchrow(
             """
-            SELECT id, user_id, plan_id, status, expected_amount
+            SELECT id, user_id, plan_id, status, expected_amount, currency
             FROM core.subscriptions
             WHERE cashfree_order_id = $1
             """,
@@ -189,15 +220,21 @@ async def activate_subscription(
         )
         if not existing:
             return None
+        order_currency = existing["currency"] or "INR"
 
         claimed = None
         if existing["status"] in ("pending", "failed"):
             # What this order was created for; older pending rows (no stored amount) use the current price.
+            if currency is not None and currency.upper() != order_currency:
+                return {**_sub_summary(existing), "activated": False, "reason": "currency_mismatch"}
             expected = (
                 float(existing["expected_amount"]) if existing["expected_amount"] is not None
-                else await get_plan_price(conn, existing["plan_id"])
+                else await get_plan_price(conn, existing["plan_id"], order_currency)
             )
-            if order_amount is not None and expected is not None and abs(float(order_amount) - expected) > 0.5:
+            # INR tolerates rounding up to 50 paise (legacy Cashfree orders). USD must match to the cent:
+            # anything under half a cent is float noise, a whole cent short is a different amount.
+            tolerance = 0.005 if order_currency == "USD" else 0.5
+            if order_amount is not None and expected is not None and abs(float(order_amount) - expected) > tolerance:
                 return {**_sub_summary(existing), "activated": False, "reason": "amount_mismatch"}
             claimed = await conn.fetchrow(
                 """
@@ -283,7 +320,7 @@ async def get_active_subscription(conn, user_id: str) -> Optional[dict]:
     row = await conn.fetchrow(
         """
         SELECT s.id, s.plan_id, s.status, s.starts_at, s.expires_at,
-               s.cashfree_order_id, s.cashfree_payment_id, s.amount_paid,
+               s.cashfree_order_id, s.cashfree_payment_id, s.amount_paid, s.currency, s.payment_gateway,
                sp.name as plan_name, sp.price_inr, sp.features
         FROM core.subscriptions s
         JOIN core.subscription_plans sp ON sp.id = s.plan_id
