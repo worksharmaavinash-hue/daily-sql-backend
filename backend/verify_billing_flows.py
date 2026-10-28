@@ -948,12 +948,11 @@ async def t_problem_progress():
     await x("DELETE FROM core.streaks WHERE user_id=$1", s_user)
     j = await streak(); check("no streak row -> 0", j["current_streak"] == 0 and j["active_today"] is False)
 
-    # --- one clock: attempts, streaks, /me/attempts/today, heat-map all use the IST app-day ---
-    real_now = timeutil.now_ist
-    IST = timeutil.IST
+    # --- one clock: attempts, streaks, /me/attempts/today, heat-map all use the UTC app-day ---
+    real_now = timeutil.now_utc
     try:
-        timeutil.now_ist = lambda: datetime(2026, 1, 15, 0, 30, tzinfo=IST)     # 00:30 IST -> app-day is still Jan 14
-        check("00:30 IST belongs to the previous app-day", timeutil.app_today() == date(2026, 1, 14))
+        timeutil.now_utc = lambda: datetime(2026, 1, 14, 23, 30, tzinfo=timezone.utc)     # 23:30 UTC -> app-day is still Jan 14
+        check("23:30 UTC belongs to the Jan 14 app-day", timeutil.app_today() == date(2026, 1, 14))
         a_user, a_em = await new_user()
         p = await add_problem("Clock problem", row=9)
         pool = await db()
@@ -971,9 +970,9 @@ async def t_problem_progress():
         j = (await client.get("/me/streak", headers=hdr(a_user, a_em))).json()
         check("streak alive and active_today at that moment", j["current_streak"] == 1 and j["active_today"] is True, str(j))
 
-        timeutil.now_ist = lambda: datetime(2026, 1, 15, 1, 30, tzinfo=IST)     # 01:30 IST -> new app-day Jan 15
+        timeutil.now_utc = lambda: datetime(2026, 1, 15, 0, 30, tzinfo=timezone.utc)     # 00:30 UTC -> new app-day Jan 15
         r = await client.get("/me/attempts/today", headers=hdr(a_user, a_em))
-        check("after 01:00 IST the new day starts with no attempts", r.json() == [], r.text)
+        check("after 00:00 UTC the new day starts with no attempts", r.json() == [], r.text)
         j = (await client.get("/me/streak", headers=hdr(a_user, a_em))).json()
         check("streak survives into the next day (yesterday counts) but is no longer active_today", j["current_streak"] == 1 and j["active_today"] is False, str(j))
         async with pool.acquire() as c:
@@ -981,7 +980,7 @@ async def t_problem_progress():
         srow = await q1("SELECT current_streak,last_active_date FROM core.streaks WHERE user_id=$1", a_user)
         check("solving on the next app-day extends the streak to 2", srow["current_streak"] == 2 and srow["last_active_date"] == date(2026, 1, 15), str(srow))
     finally:
-        timeutil.now_ist = real_now
+        timeutil.now_utc = real_now
 
 
 async def main():
