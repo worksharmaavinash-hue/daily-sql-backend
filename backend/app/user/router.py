@@ -48,36 +48,36 @@ async def get_today_practice():
             UPDATE core.problems
             SET is_active = true
             WHERE id IN (
-                SELECT easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT easy_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT medium_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT advanced_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT python_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT python_easy_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT python_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT python_medium_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT python_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT python_advanced_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT pyspark_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT pyspark_easy_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT pyspark_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT pyspark_medium_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT pyspark_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT pyspark_advanced_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT dsa_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT dsa_easy_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT dsa_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT dsa_medium_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT dsa_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT dsa_advanced_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
             ) AND is_active = false
             """
         )
         
         # 2. Remove schedule history records older than 7 days (as requested)
         await conn.execute(
-            "DELETE FROM core.daily_practice WHERE date < ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date - INTERVAL '7 days'"
+            "DELETE FROM core.daily_practice WHERE date < (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date - INTERVAL '7 days'"
         )
 
         # Try today first
@@ -152,7 +152,7 @@ async def get_problem(
                     pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
                     dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
                 )
-                AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                AND date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
             ))
             """,
             problem_id,
@@ -232,7 +232,7 @@ async def list_problems(
                     pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
                     dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
                 )
-                AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                AND date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
             )
             ORDER BY p.created_at ASC, p.id
             """
@@ -565,7 +565,7 @@ async def get_public_profile(username: str):
                     pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
                     dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
                 )
-                AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                AND date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
             )
             GROUP BY LOWER(difficulty)
             """
@@ -856,7 +856,7 @@ async def get_my_stats(user=Depends(verify_jwt)):
                     pyspark_easy_problem_id, pyspark_medium_problem_id, pyspark_advanced_problem_id,
                     dsa_easy_problem_id, dsa_medium_problem_id, dsa_advanced_problem_id
                 )
-                AND date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                AND date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
             )
             GROUP BY LOWER(difficulty)
             """

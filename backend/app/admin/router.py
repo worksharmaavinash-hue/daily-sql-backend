@@ -132,23 +132,23 @@ async def list_problems():
             UPDATE core.problems
             SET is_active = true
             WHERE id IN (
-                SELECT easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT easy_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT medium_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT advanced_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT python_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT python_easy_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT python_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT python_medium_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT python_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT python_advanced_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT pyspark_easy_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT pyspark_easy_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT pyspark_medium_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT pyspark_medium_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
                 UNION
-                SELECT pyspark_advanced_problem_id FROM core.daily_practice WHERE date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date
+                SELECT pyspark_advanced_problem_id FROM core.daily_practice WHERE date <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
             ) AND is_active = false
             """
         )
@@ -263,7 +263,7 @@ async def list_schedule():
             LEFT JOIN core.problems d1 ON dp.dsa_easy_problem_id = d1.id
             LEFT JOIN core.problems d2 ON dp.dsa_medium_problem_id = d2.id
             LEFT JOIN core.problems d3 ON dp.dsa_advanced_problem_id = d3.id
-            WHERE dp.date >= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 hour')::date - INTERVAL '7 days'
+            WHERE dp.date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date - INTERVAL '7 days'
             ORDER BY dp.date DESC
             """
         )
